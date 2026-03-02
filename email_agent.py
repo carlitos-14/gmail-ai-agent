@@ -147,4 +147,5 @@ def process_new_emails():
     logger.info(f"✔ Listo. {new_count} emails nuevos procesados.")
 
 if __name__ == "__main__":
+
     process_new_emails()
