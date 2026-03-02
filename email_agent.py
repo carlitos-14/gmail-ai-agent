@@ -28,18 +28,19 @@ GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
 ]
 
-PROCESSED_FILE = "processed_ids.json"
+BOT_LABEL = "bot-processed"
 
-# ── Cargar/guardar IDs procesados ──────────────────────────────────────────────
-def load_processed():
-    if os.path.exists(PROCESSED_FILE):
-        with open(PROCESSED_FILE) as f:
-            return set(json.load(f))
-    return set()
-
-def save_processed(ids):
-    with open(PROCESSED_FILE, "w") as f:
-        json.dump(list(ids), f)
+# ── Obtener o crear el label en Gmail ─────────────────────────────────────────
+def get_or_create_label(svc):
+    labels = svc.users().labels().list(userId="me").execute().get("labels", [])
+    for l in labels:
+        if l["name"] == BOT_LABEL:
+            return l["id"]
+    created = svc.users().labels().create(
+        userId="me", body={"name": BOT_LABEL}
+    ).execute()
+    logger.info(f"🏷️ Label '{BOT_LABEL}' creado en Gmail.")
+    return created["id"]
 
 # ── Gmail ──────────────────────────────────────────────────────────────────────
 def get_gmail_service():
@@ -101,20 +102,26 @@ def analyze(subject, sender, body):
     return json.loads(text.strip())
 
 # ── Procesador principal ───────────────────────────────────────────────────────
+def mark_bot_processed(svc, mid, label_id):
+    svc.users().messages().modify(
+        userId="me", id=mid, body={"addLabelIds": [label_id]}
+    ).execute()
+
 def process_new_emails():
     logger.info("🔍 Revisando emails...")
-    processed = load_processed()
 
     svc = get_gmail_service()
+    label_id = get_or_create_label(svc)
+
+    # Solo trae emails UNREAD que NO tengan el label bot-processed
     msgs = svc.users().messages().list(
-        userId="me", labelIds=["INBOX", "UNREAD"], maxResults=10
+        userId="me", labelIds=["INBOX", "UNREAD"], maxResults=10,
+        q=f"-label:{BOT_LABEL}"
     ).execute().get("messages", [])
 
     new_count = 0
     for ref in msgs:
         mid = ref["id"]
-        if mid in processed:
-            continue
 
         msg = svc.users().messages().get(userId="me", id=mid, format="full").execute()
         h = {x["name"]: x["value"] for x in msg["payload"]["headers"]}
@@ -140,12 +147,10 @@ def process_new_emails():
             mark_starred(svc, mid)
             logger.info(f"⭐ Escalado: {subject[:60]}")
 
-        processed.add(mid)
+        mark_bot_processed(svc, mid, label_id)
         new_count += 1
 
-    save_processed(processed)
     logger.info(f"✔ Listo. {new_count} emails nuevos procesados.")
 
 if __name__ == "__main__":
-
     process_new_emails()
