@@ -1,4 +1,4 @@
-import os, json, base64, logging
+import os, json, base64, logging, time
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -66,8 +66,15 @@ def get_body(payload):
         return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", "ignore")[:3000]
     return ""
 
-def send_reply(svc, mid, tid, to, text):
-    msg = f"To: {to}\r\nIn-Reply-To: {mid}\r\nReferences: {mid}\r\n\r\n{text}"
+def send_reply(svc, mid, tid, to, subject, text):
+    reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+    msg = (
+        f"To: {to}\r\n"
+        f"Subject: {reply_subject}\r\n"
+        f"In-Reply-To: {mid}\r\n"
+        f"References: {mid}\r\n\r\n"
+        f"{text}"
+    )
     svc.users().messages().send(
         userId="me",
         body={"raw": base64.urlsafe_b64encode(msg.encode()).decode(), "threadId": tid}
@@ -83,23 +90,32 @@ def mark_starred(svc, mid):
         userId="me", id=mid, body={"addLabelIds": ["STARRED"]}
     ).execute()
 
-# ── Análisis con Groq ──────────────────────────────────────────────────────────
-def analyze(subject, sender, body):
-    response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Asunto: {subject}\nDe: {sender}\nContenido: {body}"}
-        ],
-        temperature=0.2,
-        max_tokens=500,
-    )
-    text = response.choices[0].message.content.strip()
-    if "```" in text:
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-    return json.loads(text.strip())
+# ── Análisis con Groq (con retry) ─────────────────────────────────────────────
+def analyze(subject, sender, body, retries=3, backoff=5):
+    last_error = None
+    for attempt in range(retries):
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": f"Asunto: {subject}\nDe: {sender}\nContenido: {body}"}
+                ],
+                temperature=0.2,
+                max_tokens=500,
+            )
+            text = response.choices[0].message.content.strip()
+            if "```" in text:
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+            return json.loads(text.strip())
+        except Exception as e:
+            last_error = e
+            wait = backoff * (attempt + 1)
+            logger.warning(f"⚠️ Intento {attempt + 1}/{retries} fallido: {e}. Reintentando en {wait}s...")
+            time.sleep(wait)
+    raise last_error
 
 # ── Procesador principal ───────────────────────────────────────────────────────
 def mark_bot_processed(svc, mid, label_id):
@@ -140,7 +156,7 @@ def process_new_emails():
         reply  = d.get("reply_message", "")
 
         if action == "respond" and reply:
-            send_reply(svc, mid, tid, sender, reply)
+            send_reply(svc, mid, tid, sender, subject, reply)
             mark_read(svc, mid)
             logger.info(f"✅ Respondido: {subject[:60]}")
         else:
