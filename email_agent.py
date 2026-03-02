@@ -1,4 +1,5 @@
 import os, json, base64, logging, time
+from email.header import Header
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -30,6 +31,27 @@ GMAIL_SCOPES = [
 
 BOT_LABEL = "bot-processed"
 
+
+# ── FIX #1: Credenciales robustas ─────────────────────────────────────────────
+def get_gmail_service():
+    creds_data = json.loads(os.environ["GMAIL_CREDENTIALS_JSON"])
+    creds = Credentials(
+        token=creds_data.get("token"),
+        refresh_token=creds_data.get("refresh_token"),
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=creds_data.get("client_id"),
+        client_secret=creds_data.get("client_secret"),
+        scopes=GMAIL_SCOPES,
+    )
+    # FIX: usar creds.valid en lugar de solo creds.expired
+    if not creds.valid:
+        if creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            raise RuntimeError("Credenciales de Gmail inválidas y sin refresh_token.")
+    return build("gmail", "v1", credentials=creds)
+
+
 # ── Obtener o crear el label en Gmail ─────────────────────────────────────────
 def get_or_create_label(svc):
     labels = svc.users().labels().list(userId="me").execute().get("labels", [])
@@ -42,55 +64,67 @@ def get_or_create_label(svc):
     logger.info(f"🏷️ Label '{BOT_LABEL}' creado en Gmail.")
     return created["id"]
 
-# ── Gmail ──────────────────────────────────────────────────────────────────────
-def get_gmail_service():
-    creds_data = json.loads(os.environ["GMAIL_CREDENTIALS_JSON"])
-    creds = Credentials(
-        token=creds_data.get("token"),
-        refresh_token=creds_data.get("refresh_token"),
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=creds_data.get("client_id"),
-        client_secret=creds_data.get("client_secret"),
-        scopes=GMAIL_SCOPES,
-    )
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-    return build("gmail", "v1", credentials=creds)
 
+# ── FIX #2: get_body recursivo para emails anidados ───────────────────────────
 def get_body(payload):
-    if "parts" in payload:
-        for p in payload["parts"]:
-            if p["mimeType"] == "text/plain":
-                return base64.urlsafe_b64decode(p["body"].get("data", "")).decode("utf-8", "ignore")[:3000]
-    elif payload["body"].get("data"):
-        return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", "ignore")[:3000]
+    """Extrae texto plano de forma recursiva para soportar estructuras MIME anidadas."""
+    mime = payload.get("mimeType", "")
+
+    if mime == "text/plain":
+        data = payload.get("body", {}).get("data", "")
+        if data:
+            return base64.urlsafe_b64decode(data).decode("utf-8", "ignore")[:3000]
+
+    for part in payload.get("parts", []):
+        result = get_body(part)
+        if result:
+            return result
+
     return ""
 
+
+# ── FIX #3: send_reply con subject codificado correctamente ───────────────────
 def send_reply(svc, mid, tid, to, subject, text):
     reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+    # Codificar subject para soportar tildes, emojis, etc.
+    encoded_subject = Header(reply_subject, "utf-8").encode()
+
     msg = (
         f"To: {to}\r\n"
-        f"Subject: {reply_subject}\r\n"
+        f"Subject: {encoded_subject}\r\n"
+        f"Content-Type: text/plain; charset=utf-8\r\n"
         f"In-Reply-To: {mid}\r\n"
         f"References: {mid}\r\n\r\n"
         f"{text}"
     )
     svc.users().messages().send(
         userId="me",
-        body={"raw": base64.urlsafe_b64encode(msg.encode()).decode(), "threadId": tid}
+        body={
+            "raw": base64.urlsafe_b64encode(msg.encode("utf-8")).decode(),
+            "threadId": tid,
+        }
     ).execute()
+
 
 def mark_read(svc, mid):
     svc.users().messages().modify(
         userId="me", id=mid, body={"removeLabelIds": ["UNREAD"]}
     ).execute()
 
+
 def mark_starred(svc, mid):
     svc.users().messages().modify(
         userId="me", id=mid, body={"addLabelIds": ["STARRED"]}
     ).execute()
 
-# ── Análisis con Groq (con retry) ─────────────────────────────────────────────
+
+def mark_bot_processed(svc, mid, label_id):
+    svc.users().messages().modify(
+        userId="me", id=mid, body={"addLabelIds": [label_id]}
+    ).execute()
+
+
+# ── FIX #4: Análisis con Groq con retry y backoff ─────────────────────────────
 def analyze(subject, sender, body, retries=3, backoff=5):
     last_error = None
     for attempt in range(retries):
@@ -117,12 +151,8 @@ def analyze(subject, sender, body, retries=3, backoff=5):
             time.sleep(wait)
     raise last_error
 
-# ── Procesador principal ───────────────────────────────────────────────────────
-def mark_bot_processed(svc, mid, label_id):
-    svc.users().messages().modify(
-        userId="me", id=mid, body={"addLabelIds": [label_id]}
-    ).execute()
 
+# ── Procesador principal ───────────────────────────────────────────────────────
 def process_new_emails():
     logger.info("🔍 Revisando emails...")
 
@@ -131,7 +161,9 @@ def process_new_emails():
 
     # Solo trae emails UNREAD que NO tengan el label bot-processed
     msgs = svc.users().messages().list(
-        userId="me", labelIds=["INBOX", "UNREAD"], maxResults=10,
+        userId="me",
+        labelIds=["INBOX", "UNREAD"],
+        maxResults=10,
         q=f"-label:{BOT_LABEL}"
     ).execute().get("messages", [])
 
@@ -149,7 +181,7 @@ def process_new_emails():
         try:
             d = analyze(subject, sender, body)
         except Exception as e:
-            logger.error(f"Error Groq: {e}")
+            logger.error(f"Error Groq tras reintentos: {e}")
             d = {"action": "escalate", "reason": f"Error IA: {e}", "reply_message": ""}
 
         action = d.get("action", "escalate")
@@ -161,12 +193,13 @@ def process_new_emails():
             logger.info(f"✅ Respondido: {subject[:60]}")
         else:
             mark_starred(svc, mid)
-            logger.info(f"⭐ Escalado: {subject[:60]}")
+            logger.info(f"⭐ Escalado: {subject[:60]} | Motivo: {d.get('reason', '?')}")
 
         mark_bot_processed(svc, mid, label_id)
         new_count += 1
 
     logger.info(f"✔ Listo. {new_count} emails nuevos procesados.")
+
 
 if __name__ == "__main__":
     process_new_emails()
