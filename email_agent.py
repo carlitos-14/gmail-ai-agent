@@ -9,7 +9,7 @@ from dateutil import parser as dateparser
 # Módulos nuevos
 from pdf_context import load_company_context
 from supabase_client import guardar_cita, obtener_ultimo_event_id, eliminar_cita
-from calendar_client import agendar_cita, cancelar_cita
+from calendar_client import agendar_cita, cancelar_cita, buscar_slots_libres
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -196,16 +196,38 @@ def handle_agendar(svc, mid, tid, sender, subject, decision):
         mark_read(svc, mid)
         logger.info(f"📅 Cita agendada y confirmada: {subject[:60]}")
     else:
-        logger.warning("⛔ Slot ocupado. Notificando al cliente.")
-        mensaje_ocupado = (
-            f"Hola,\n\n"
-            f"Gracias por contactarnos. Lamentablemente el horario solicitado "
-            f"({fecha_dt.strftime('%d/%m/%Y a las %H:%M')}) no está disponible "
-            f"ya que tenemos otra cita en ese rango horario.\n\n"
-            f"Por favor, indícanos otro horario de tu preferencia y lo agendamos "
-            f"sin problema.\n\nRecuerda que atendemos todos los días de 9:30 a 17:00.\n\n"
-            f"Un saludo,\n{COMPANY}"
-        )
+        logger.warning("⛔ Slot ocupado. Buscando alternativas y notificando al cliente.")
+
+        slots_libres = buscar_slots_libres(fecha_dt, num_slots=3)
+
+        if slots_libres:
+            opciones_texto = "\n".join(
+                f"  • {s.strftime('%A %d/%m/%Y a las %H:%M')}"
+                for s in slots_libres
+            )
+            mensaje_ocupado = (
+                f"Hola,\n\n"
+                f"Gracias por contactarnos. Lamentablemente el horario solicitado "
+                f"({fecha_dt.strftime('%d/%m/%Y a las %H:%M')}) no está disponible "
+                f"ya que tenemos otra cita en ese rango horario.\n\n"
+                f"Te proponemos las siguientes fechas libres próximas:\n\n"
+                f"{opciones_texto}\n\n"
+                f"Confírmanos cuál de estas opciones te viene mejor y lo agendamos "
+                f"de inmediato.\n\nRecuerda que atendemos de lunes a viernes de 9:30 a 17:00.\n\n"
+                f"Un saludo,\n{COMPANY}"
+            )
+        else:
+            mensaje_ocupado = (
+                f"Hola,\n\n"
+                f"Gracias por contactarnos. Lamentablemente el horario solicitado "
+                f"({fecha_dt.strftime('%d/%m/%Y a las %H:%M')}) no está disponible "
+                f"ya que tenemos otra cita en ese rango horario.\n\n"
+                f"En este momento no encontramos huecos libres en los próximos días. "
+                f"Por favor, indícanos otro horario de tu preferencia y lo revisamos "
+                f"sin problema.\n\nRecuerda que atendemos de lunes a viernes de 9:30 a 17:00.\n\n"
+                f"Un saludo,\n{COMPANY}"
+            )
+
         send_reply(svc, mid, tid, sender, subject, mensaje_ocupado)
         mark_read(svc, mid)
 
@@ -217,7 +239,6 @@ def handle_cancelar(svc, mid, tid, sender, subject, decision):
     event_id = obtener_ultimo_event_id(sender)
 
     if not event_id:
-        # No hay cita registrada → escalamos para revisión manual
         logger.warning(f"⚠️ No se encontró cita para cancelar: {sender}. Escalando.")
         mark_starred(svc, mid)
         return
@@ -306,5 +327,3 @@ def process_new_emails():
 
 if __name__ == "__main__":
     process_new_emails()
-
-
