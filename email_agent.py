@@ -196,7 +196,6 @@ def handle_agendar(svc, mid, tid, sender, subject, decision):
         mark_read(svc, mid)
         logger.info(f"📅 Cita agendada y confirmada: {subject[:60]}")
     else:
-        else:
         logger.warning("⛔ Slot ocupado. Notificando al cliente.")
         mensaje_ocupado = (
             f"Hola,\n\n"
@@ -307,4 +306,5 @@ def process_new_emails():
 
 if __name__ == "__main__":
     process_new_emails()
+
 
