@@ -37,13 +37,11 @@ _HOY     = f"{_DIAS_ES[_HOY_DT.weekday()]} {_HOY_DT.strftime('%d/%m/%Y')}"
 
 def _calendario_proximos_dias(n=14):
     """Genera una tabla de los próximos n días para incluir en el prompt."""
-    from datetime import timedelta
     lineas = []
     for i in range(n):
         d = _HOY_DT + timedelta(days=i)
         lineas.append(f"  - {_DIAS_ES[d.weekday()]} = {d.strftime('%Y-%m-%d')}")
-    return "
-".join(lineas)
+    return "\n".join(lineas)
 
 _CALENDARIO = _calendario_proximos_dias()
 
