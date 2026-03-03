@@ -13,7 +13,7 @@ TZ_MADRID = ZoneInfo("Europe/Madrid")
 # Módulos nuevos
 from pdf_context import load_company_context
 from supabase_client import guardar_cita, obtener_ultimo_event_id, eliminar_cita
-from calendar_client import agendar_cita, cancelar_cita, buscar_slots_libres
+from calendar_client import agendar_cita, cancelar_cita, buscar_slots_libres, slot_disponible
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ CONTEXT_BLOCK = (
     if COMPANY_CONTEXT else ""
 )
 
-# Fecha de hoy para que el LLM pueda resolver expresiones relativas como "el próximo viernes"
+# Fecha de hoy para que el LLM pueda resolver expresiones relativas
 _HOY = datetime.now(tz=TZ_MADRID).strftime("%A %d/%m/%Y")
 
 SYSTEM_PROMPT = f"""Eres el asistente de atención al cliente de {COMPANY}.
@@ -41,24 +41,25 @@ La fecha de hoy es {_HOY}. Usa este dato para resolver expresiones relativas com
 
 Analiza el email y responde SOLO con JSON válido (sin markdown, sin texto extra):
 {{
-  "accion": "AGENDAR" | "CANCELAR" | "RESPONDER" | "ESCALAR",
-  "fecha_hora": "YYYY-MM-DDTHH:MM:SS" (solo si accion es AGENDAR, si no: null),
+  "accion": "AGENDAR" | "CANCELAR" | "CONSULTAR" | "RESPONDER" | "ESCALAR",
+  "fecha_hora": "YYYY-MM-DDTHH:MM:SS" (solo si accion es AGENDAR o CONSULTAR, si no: null),
   "respuesta_texto": "Texto completo para el cuerpo del correo al cliente"
 }}
 
 Reglas de decisión:
-- AGENDAR  → el cliente pide una cita, reunión o llamada con fecha/hora concreta
-- CANCELAR → el cliente quiere cancelar o anular una cita existente
+- AGENDAR   → el cliente pide una cita concreta con fecha y hora
+- CANCELAR  → el cliente quiere cancelar o anular una cita existente
+- CONSULTAR → el cliente pregunta por disponibilidad de un día o una hora concreta sin confirmar cita
+              (ej: "¿tenéis hueco el viernes?", "¿está libre el lunes a las 10?", "¿qué horas tenéis disponibles el martes?")
+              En este caso fecha_hora debe ser el día consultado a las 09:30 si no indica hora, o a la hora indicada si la menciona.
 - RESPONDER → preguntas simples, FAQs, info sobre servicios (usa la documentación)
-- ESCALAR  → quejas, temas legales, situaciones complejas, dudas sin respuesta en la documentación,
-             o cuando el cliente pide explícitamente hablar con una persona, el encargado, responsable o personal humano.
-             En estos casos, respuesta_texto debe explicar claramente al cliente el motivo
-             (ej: horario cerrado, fecha incorrecta, tema que requiere atención personalizada...)
-             y ser un mensaje completo listo para enviar al cliente.
+- ESCALAR   → quejas, temas legales, situaciones complejas, dudas sin respuesta en la documentación,
+              o cuando el cliente pide explícitamente hablar con una persona, el encargado, responsable o personal humano.
+              En estos casos, respuesta_texto debe explicar claramente al cliente el motivo.
 
-Si la fecha/hora no está clara para AGENDAR, usa ESCALAR en su lugar.
+Si la fecha/hora no está clara para AGENDAR o CONSULTAR, usa ESCALAR en su lugar.
 
-IMPORTANTE: En respuesta_texto NO incluyas fecha ni hora. Escribe únicamente
+IMPORTANTE: En respuesta_texto para AGENDAR NO incluyas fecha ni hora. Escribe únicamente
 el texto de confirmación sin mencionar ninguna fecha ni hora concreta, por ejemplo:
 "Estimado [nombre], gracias por contactarnos. Le confirmamos que su cita ha sido agendada
 en nuestra oficina. Si necesita realizar algún cambio o cancelación, no dude en hacérnoslo saber."
@@ -107,19 +108,15 @@ def get_or_create_label(svc):
 
 # ── Extracción de cuerpo del email ─────────────────────────────────────────────
 def get_body(payload):
-    """Extrae texto plano de forma recursiva para soportar estructuras MIME anidadas."""
     mime = payload.get("mimeType", "")
-
     if mime == "text/plain":
         data = payload.get("body", {}).get("data", "")
         if data:
             return base64.urlsafe_b64decode(data).decode("utf-8", "ignore")[:3000]
-
     for part in payload.get("parts", []):
         result = get_body(part)
         if result:
             return result
-
     return ""
 
 
@@ -127,7 +124,6 @@ def get_body(payload):
 def send_reply(svc, mid, tid, to, subject, text):
     reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
     encoded_subject = Header(reply_subject, "utf-8").encode()
-
     msg = (
         f"To: {to}\r\n"
         f"Subject: {encoded_subject}\r\n"
@@ -195,13 +191,36 @@ def analyze(subject, sender, body, retries=3, backoff=5):
 DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
 def fecha_legible(dt: datetime) -> str:
-    """Devuelve una fecha con día de la semana calculado por código, nunca por el LLM."""
     return f"{DIAS[dt.weekday()]} {dt.strftime('%d/%m/%Y')} a las {dt.strftime('%H:%M')}"
+
+
+def slots_del_dia(fecha_referencia: datetime, hora_concreta: bool = False, num_slots: int = 3) -> list[datetime]:
+    """
+    Si hora_concreta=True, comprueba solo esa hora exacta.
+    Si hora_concreta=False, busca hasta num_slots huecos libres en ese día (9:30-17:00).
+    """
+    HORA_INICIO = 9
+    MIN_INICIO  = 30
+    HORA_FIN    = 17
+
+    if hora_concreta:
+        return [fecha_referencia] if slot_disponible(fecha_referencia) else []
+
+    # Generar todas las horas en punto del día laboral
+    candidatos = []
+    hora = fecha_referencia.replace(hour=HORA_INICIO, minute=MIN_INICIO, second=0, microsecond=0)
+    while hora.hour < HORA_FIN:
+        if slot_disponible(hora):
+            candidatos.append(hora)
+            if len(candidatos) >= num_slots:
+                break
+        hora += timedelta(hours=1)
+
+    return candidatos
 
 
 # ── Manejadores de cada acción ─────────────────────────────────────────────────
 def handle_agendar(svc, mid, tid, sender, subject, decision):
-    """Agenda la cita en Calendar, guarda en Supabase y responde al cliente."""
     fecha_str = decision.get("fecha_hora")
     respuesta = decision.get("respuesta_texto", "")
 
@@ -214,7 +233,6 @@ def handle_agendar(svc, mid, tid, sender, subject, decision):
         fecha_dt = dateparser.parse(fecha_str)
         if fecha_dt is None:
             raise ValueError("dateparser devolvió None")
-        # Forzar siempre zona horaria Europe/Madrid
         fecha_dt = fecha_dt.replace(tzinfo=None)
         fecha_dt = fecha_dt.replace(tzinfo=TZ_MADRID)
     except Exception as e:
@@ -222,7 +240,6 @@ def handle_agendar(svc, mid, tid, sender, subject, decision):
         mark_starred(svc, mid)
         return
 
-    # Si la fecha ya pasó, corregir al año actual o al siguiente
     hoy = datetime.now(tz=fecha_dt.tzinfo)
     if fecha_dt < hoy:
         fecha_dt = fecha_dt.replace(year=hoy.year)
@@ -234,7 +251,6 @@ def handle_agendar(svc, mid, tid, sender, subject, decision):
 
     if event_id:
         guardar_cita(email=sender, event_id=event_id, fecha_cita=fecha_dt)
-        # La fecha siempre la añade el código, nunca el LLM
         confirmacion = (
             f"{respuesta.rstrip()}\n\n"
             f"📅 Fecha confirmada: {fecha_legible(fecha_dt)}."
@@ -244,13 +260,10 @@ def handle_agendar(svc, mid, tid, sender, subject, decision):
         logger.info(f"📅 Cita agendada y confirmada: {subject[:60]}")
     else:
         logger.warning("⛔ Slot ocupado. Buscando alternativas y notificando al cliente.")
-
         slots_libres = buscar_slots_libres(fecha_dt, num_slots=3)
 
         if slots_libres:
-            opciones_texto = "\n".join(
-                f"  • {fecha_legible(s)}" for s in slots_libres
-            )
+            opciones_texto = "\n".join(f"  • {fecha_legible(s)}" for s in slots_libres)
             mensaje_ocupado = (
                 f"Hola,\n\n"
                 f"Gracias por contactarnos. Lamentablemente el horario solicitado "
@@ -278,10 +291,122 @@ def handle_agendar(svc, mid, tid, sender, subject, decision):
         mark_read(svc, mid)
 
 
-def handle_cancelar(svc, mid, tid, sender, subject, decision):
-    """Busca el event_id en Supabase, cancela en Calendar y responde al cliente."""
-    respuesta = decision.get("respuesta_texto", "")
+def handle_consultar(svc, mid, tid, sender, subject, decision):
+    """Responde con los huecos disponibles del día/hora consultado."""
+    fecha_str = decision.get("fecha_hora")
 
+    if not fecha_str:
+        logger.warning("⚠️ CONSULTAR sin fecha_hora. Escalando.")
+        mark_starred(svc, mid)
+        return
+
+    try:
+        fecha_dt = dateparser.parse(fecha_str)
+        if fecha_dt is None:
+            raise ValueError("dateparser devolvió None")
+        fecha_dt = fecha_dt.replace(tzinfo=None)
+        fecha_dt = fecha_dt.replace(tzinfo=TZ_MADRID)
+    except Exception as e:
+        logger.error(f"❌ No se pudo parsear la fecha '{fecha_str}': {e}. Escalando.")
+        mark_starred(svc, mid)
+        return
+
+    hoy = datetime.now(tz=fecha_dt.tzinfo)
+    if fecha_dt < hoy:
+        fecha_dt = fecha_dt.replace(year=hoy.year)
+        if fecha_dt < hoy:
+            fecha_dt = fecha_dt.replace(year=hoy.year + 1)
+
+    # Si el LLM puso una hora concreta (distinta de 09:30), consultamos esa hora exacta
+    hora_concreta = not (fecha_dt.hour == 9 and fecha_dt.minute == 30)
+    slots = slots_del_dia(fecha_dt, hora_concreta=hora_concreta, num_slots=3)
+
+    dia_str = f"{DIAS[fecha_dt.weekday()]} {fecha_dt.strftime('%d/%m/%Y')}"
+
+    if hora_concreta:
+        # El cliente preguntó por una hora concreta
+        if slots:
+            mensaje = (
+                f"Hola,\n\n"
+                f"Sí, el {dia_str} a las {fecha_dt.strftime('%H:%M')} está disponible.\n\n"
+                f"Si deseas confirmar la cita, responde a este correo y lo agendamos de inmediato.\n\n"
+                f"Recuerda que atendemos de lunes a viernes de 9:30 a 17:00.\n\n"
+                f"Un saludo,\n{COMPANY}"
+            )
+        else:
+            # Hora ocupada — ofrecemos alternativas ese mismo día, y si no hay, los próximos slots
+            alternativas = slots_del_dia(fecha_dt, hora_concreta=False, num_slots=3)
+            if alternativas:
+                opciones_texto = "\n".join(f"  • {fecha_legible(s)}" for s in alternativas)
+                mensaje = (
+                    f"Hola,\n\n"
+                    f"Lamentablemente el {dia_str} a las {fecha_dt.strftime('%H:%M')} no está disponible.\n\n"
+                    f"Sin embargo, sí tenemos los siguientes huecos libres ese día:\n\n"
+                    f"{opciones_texto}\n\n"
+                    f"¿Te viene bien alguno? Responde confirmando y lo agendamos.\n\n"
+                    f"Un saludo,\n{COMPANY}"
+                )
+            else:
+                proximos = buscar_slots_libres(fecha_dt, num_slots=3)
+                if proximos:
+                    opciones_texto = "\n".join(f"  • {fecha_legible(s)}" for s in proximos)
+                    mensaje = (
+                        f"Hola,\n\n"
+                        f"Lamentablemente el {dia_str} no tenemos huecos disponibles.\n\n"
+                        f"Las próximas fechas libres más cercanas son:\n\n"
+                        f"{opciones_texto}\n\n"
+                        f"¿Te viene bien alguna? Responde confirmando y lo agendamos.\n\n"
+                        f"Un saludo,\n{COMPANY}"
+                    )
+                else:
+                    mensaje = (
+                        f"Hola,\n\n"
+                        f"Lamentablemente el {dia_str} no tenemos huecos disponibles "
+                        f"ni encontramos fechas libres en los próximos días.\n\n"
+                        f"Por favor, contáctanos de nuevo más adelante.\n\n"
+                        f"Recuerda que atendemos de lunes a viernes de 9:30 a 17:00.\n\n"
+                        f"Un saludo,\n{COMPANY}"
+                    )
+    else:
+        # El cliente preguntó por disponibilidad general del día
+        if slots:
+            opciones_texto = "\n".join(f"  • {fecha_legible(s)}" for s in slots)
+            mensaje = (
+                f"Hola,\n\n"
+                f"Para el {dia_str} tenemos los siguientes huecos disponibles:\n\n"
+                f"{opciones_texto}\n\n"
+                f"Si deseas confirmar alguno, responde a este correo indicando tu preferencia.\n\n"
+                f"Un saludo,\n{COMPANY}"
+            )
+        else:
+            proximos = buscar_slots_libres(fecha_dt, num_slots=3)
+            if proximos:
+                opciones_texto = "\n".join(f"  • {fecha_legible(s)}" for s in proximos)
+                mensaje = (
+                    f"Hola,\n\n"
+                    f"Lamentablemente el {dia_str} no tenemos huecos disponibles.\n\n"
+                    f"Las próximas fechas libres más cercanas son:\n\n"
+                    f"{opciones_texto}\n\n"
+                    f"¿Te viene bien alguna? Responde confirmando y lo agendamos.\n\n"
+                    f"Un saludo,\n{COMPANY}"
+                )
+            else:
+                mensaje = (
+                    f"Hola,\n\n"
+                    f"Lamentablemente el {dia_str} no tenemos huecos disponibles "
+                    f"ni encontramos fechas libres en los próximos días.\n\n"
+                    f"Por favor, contáctanos de nuevo más adelante.\n\n"
+                    f"Recuerda que atendemos de lunes a viernes de 9:30 a 17:00.\n\n"
+                    f"Un saludo,\n{COMPANY}"
+                )
+
+    send_reply(svc, mid, tid, sender, subject, mensaje)
+    mark_read(svc, mid)
+    logger.info(f"🔍 Consulta de disponibilidad respondida: {subject[:60]}")
+
+
+def handle_cancelar(svc, mid, tid, sender, subject, decision):
+    respuesta = decision.get("respuesta_texto", "")
     event_id = obtener_ultimo_event_id(sender)
 
     if not event_id:
@@ -302,7 +427,6 @@ def handle_cancelar(svc, mid, tid, sender, subject, decision):
 
 
 def handle_responder(svc, mid, tid, sender, subject, decision):
-    """Envía la respuesta directa al cliente."""
     respuesta = decision.get("respuesta_texto", "")
     if respuesta:
         send_reply(svc, mid, tid, sender, subject, respuesta)
@@ -314,12 +438,10 @@ def handle_responder(svc, mid, tid, sender, subject, decision):
 
 
 def handle_escalar(svc, mid, tid, sender, subject, decision):
-    """Marca con estrella, avisa al equipo y responde al cliente con el motivo."""
     mark_starred(svc, mid)
     motivo = decision.get("respuesta_texto", "Sin motivo especificado")
     logger.info(f"⭐ Escalado: {subject[:60]} | Motivo: {motivo[:80]}")
 
-    # Respuesta al cliente con el motivo real generado por el LLM
     mensaje_cliente = motivo if motivo else (
         f"Hola,\n\n"
         f"Hemos recibido tu mensaje y nuestro equipo lo revisará a la mayor brevedad posible.\n\n"
@@ -328,7 +450,6 @@ def handle_escalar(svc, mid, tid, sender, subject, decision):
     )
     send_reply(svc, mid, tid, sender, subject, mensaje_cliente)
 
-    # Aviso interno al email de contacto
     if CONTACT_EMAIL:
         aviso_interno = (
             f"Se ha escalado un email para revisión manual.\n\n"
@@ -392,6 +513,8 @@ def process_new_emails():
 
         if accion == "AGENDAR":
             handle_agendar(svc, mid, tid, sender, subject, decision)
+        elif accion == "CONSULTAR":
+            handle_consultar(svc, mid, tid, sender, subject, decision)
         elif accion == "CANCELAR":
             handle_cancelar(svc, mid, tid, sender, subject, decision)
         elif accion == "RESPONDER":
