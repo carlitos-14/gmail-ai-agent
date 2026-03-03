@@ -41,7 +41,10 @@ Reglas de decisión:
 - RESPONDER → preguntas simples, FAQs, info sobre servicios (usa la documentación)
 - ESCALAR  → quejas, temas legales, situaciones complejas o dudas sin respuesta en la documentación
 
-Si la fecha/hora no está clara para AGENDAR, usa ESCALAR en su lugar."""
+Si la fecha/hora no está clara para AGENDAR, usa ESCALAR en su lugar.
+
+IMPORTANTE: En respuesta_texto NUNCA escribas el día de la semana (lunes, martes, etc.).
+Usa solo el formato de fecha DD/MM/YYYY. El sistema insertará el día correcto automáticamente."""
 
 GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -188,10 +191,22 @@ def handle_agendar(svc, mid, tid, sender, subject, decision):
         mark_starred(svc, mid)
         return
 
+    # Si la fecha ya pasó, corregir al año actual o al siguiente
+    hoy = datetime.now(tz=fecha_dt.tzinfo)
+    if fecha_dt < hoy:
+        fecha_dt = fecha_dt.replace(year=hoy.year)
+        if fecha_dt < hoy:
+            fecha_dt = fecha_dt.replace(year=hoy.year + 1)
+        logger.warning(f"⚠️ Fecha en el pasado corregida a: {fecha_dt}")
+
     event_id = agendar_cita(fecha_dt, sender, subject)
 
     if event_id:
         guardar_cita(email=sender, event_id=event_id, fecha_cita=fecha_dt)
+        # Sustituir cualquier fecha en respuesta_texto por la versión con día correcto
+        DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+        fecha_correcta = f"{DIAS[fecha_dt.weekday()]} {fecha_dt.strftime('%d/%m/%Y')} a las {fecha_dt.strftime('%H:%M')}"
+        respuesta = respuesta.replace(fecha_dt.strftime("%d/%m/%Y"), fecha_correcta)
         send_reply(svc, mid, tid, sender, subject, respuesta)
         mark_read(svc, mid)
         logger.info(f"📅 Cita agendada y confirmada: {subject[:60]}")
