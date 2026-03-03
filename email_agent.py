@@ -35,18 +35,32 @@ _DIAS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "do
 _HOY_DT  = datetime.now(tz=TZ_MADRID)
 _HOY     = f"{_DIAS_ES[_HOY_DT.weekday()]} {_HOY_DT.strftime('%d/%m/%Y')}"
 
+def _calendario_proximos_dias(n=14):
+    """Genera una tabla de los próximos n días para incluir en el prompt."""
+    from datetime import timedelta
+    lineas = []
+    for i in range(n):
+        d = _HOY_DT + timedelta(days=i)
+        lineas.append(f"  - {_DIAS_ES[d.weekday()]} = {d.strftime('%Y-%m-%d')}")
+    return "
+".join(lineas)
+
+_CALENDARIO = _calendario_proximos_dias()
+
 SYSTEM_PROMPT = f"""Eres el asistente de atención al cliente de {COMPANY}.
 {CONTEXT_BLOCK}
 
-La fecha de hoy es {_HOY}.
+La fecha de hoy es {_HOY}. Calendario de los próximos días (úsalo para resolver
+expresiones como "el próximo jueves", "mañana", "la semana que viene"):
+
+{_CALENDARIO}
+
+Siempre devuelve fecha_hora en formato YYYY-MM-DDTHH:MM:SS, nunca texto.
 
 Analiza el email y responde SOLO con JSON válido (sin markdown, sin texto extra):
 {{
   "accion": "AGENDAR" | "CANCELAR" | "CONSULTAR" | "RESPONDER" | "ESCALAR",
-  "fecha_hora": "YYYY-MM-DDTHH:MM:SS" (solo si accion es AGENDAR o CONSULTAR, si no: null).
-              Para fechas relativas como "el próximo jueves", "mañana", etc., devuelve
-              la expresión original en el campo fecha_hora en lugar de calcularla
-              (ej: "el próximo jueves a las 10:00"). El sistema calculará la fecha exacta.
+  "fecha_hora": "YYYY-MM-DDTHH:MM:SS" (solo si accion es AGENDAR o CONSULTAR, si no: null),
   "respuesta_texto": "Texto completo para el cuerpo del correo al cliente"
 }}
 
