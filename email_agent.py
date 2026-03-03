@@ -31,7 +31,9 @@ CONTEXT_BLOCK = (
 )
 
 # Fecha de hoy para que el LLM pueda resolver expresiones relativas
-_HOY = datetime.now(tz=TZ_MADRID).strftime("%A %d/%m/%Y")
+_DIAS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+_HOY_DT  = datetime.now(tz=TZ_MADRID)
+_HOY     = f"{_DIAS_ES[_HOY_DT.weekday()]} {_HOY_DT.strftime('%d/%m/%Y')}"
 
 SYSTEM_PROMPT = f"""Eres el asistente de atención al cliente de {COMPANY}.
 {CONTEXT_BLOCK}
