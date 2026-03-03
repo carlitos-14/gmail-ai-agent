@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 # ── Clientes ───────────────────────────────────────────────────────────────────
 groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
 COMPANY = os.environ.get("COMPANY_NAME", "Nuestra Empresa")
+CONTACT_EMAIL = os.environ.get("CONTACT_EMAIL", "")
 
 # ── Contexto de empresa desde PDF ─────────────────────────────────────────────
 COMPANY_CONTEXT = load_company_context()
@@ -40,7 +41,8 @@ Reglas de decisión:
 - AGENDAR  → el cliente pide una cita, reunión o llamada con fecha/hora concreta
 - CANCELAR → el cliente quiere cancelar o anular una cita existente
 - RESPONDER → preguntas simples, FAQs, info sobre servicios (usa la documentación)
-- ESCALAR  → quejas, temas legales, situaciones complejas o dudas sin respuesta en la documentación
+- ESCALAR  → quejas, temas legales, situaciones complejas, dudas sin respuesta en la documentación,
+             o cuando el cliente pide explícitamente hablar con una persona, el encargado, responsable o personal humano
 
 Si la fecha/hora no está clara para AGENDAR, usa ESCALAR en su lugar.
 
@@ -283,10 +285,44 @@ def handle_responder(svc, mid, tid, sender, subject, decision):
         mark_starred(svc, mid)
 
 
-def handle_escalar(svc, mid, subject, decision):
-    """Marca con estrella para revisión manual."""
+def handle_escalar(svc, mid, tid, sender, subject, decision):
+    """Marca con estrella, avisa al equipo y confirma recepción al cliente."""
     mark_starred(svc, mid)
-    logger.info(f"⭐ Escalado: {subject[:60]} | Motivo: {decision.get('respuesta_texto', '?')[:80]}")
+    motivo = decision.get("respuesta_texto", "Sin motivo especificado")
+    logger.info(f"⭐ Escalado: {subject[:60]} | Motivo: {motivo[:80]}")
+
+    # Confirmación al cliente
+    mensaje_cliente = (
+        f"Hola,\n\n"
+        f"Hemos recibido tu mensaje y nuestro equipo lo revisará a la mayor brevedad posible.\n\n"
+        f"En breve nos pondremos en contacto contigo.\n\n"
+        f"Un saludo,\n{COMPANY}"
+    )
+    send_reply(svc, mid, tid, sender, subject, mensaje_cliente)
+
+    # Aviso interno al email de contacto
+    if CONTACT_EMAIL:
+        aviso_interno = (
+            f"Se ha escalado un email para revisión manual.\n\n"
+            f"De: {sender}\n"
+            f"Asunto: {subject}\n"
+            f"Motivo: {motivo}\n\n"
+            f"Revísalo en Gmail (estará marcado con ⭐)."
+        )
+        try:
+            msg = (
+                f"To: {CONTACT_EMAIL}\r\n"
+                f"Subject: [ESCALADO] {subject}\r\n"
+                f"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+                f"{aviso_interno}"
+            )
+            svc.users().messages().send(
+                userId="me",
+                body={"raw": base64.urlsafe_b64encode(msg.encode("utf-8")).decode()},
+            ).execute()
+            logger.info(f"📨 Aviso de escalado enviado a {CONTACT_EMAIL}")
+        except Exception as e:
+            logger.error(f"❌ Error enviando aviso de escalado: {e}")
 
 
 # ── Procesador principal ───────────────────────────────────────────────────────
@@ -333,7 +369,7 @@ def process_new_emails():
         elif accion == "RESPONDER":
             handle_responder(svc, mid, tid, sender, subject, decision)
         else:
-            handle_escalar(svc, mid, subject, decision)
+            handle_escalar(svc, mid, tid, sender, subject, decision)
 
         mark_bot_processed(svc, mid, label_id)
         new_count += 1
