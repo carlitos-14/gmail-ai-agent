@@ -75,6 +75,28 @@ def obtener_ultimo_event_id(email: str) -> str | None:
         return None
 
 
+def obtener_todas_citas_cliente(email: str) -> list[dict]:
+    """
+    Devuelve todas las citas futuras de un cliente concreto.
+    Usado para cancelar todas sus citas de una vez.
+    """
+    try:
+        db = get_supabase()
+        ahora = datetime.now().astimezone().isoformat()
+        result = (
+            db.table("citas")
+            .select("event_id, fecha_cita")
+            .eq("email", email)
+            .gt("fecha_cita", ahora)
+            .order("fecha_cita")
+            .execute()
+        )
+        return result.data or []
+    except Exception as e:
+        logger.error(f"❌ Error obteniendo citas de {email}: {e}")
+        return []
+
+
 MAX_CITAS_ACTIVAS = int(os.environ.get("MAX_CITAS_ACTIVAS", "2"))
 
 
@@ -114,6 +136,37 @@ def eliminar_cita(email: str, event_id: str) -> bool:
     except Exception as e:
         logger.error(f"❌ Error eliminando cita de Supabase: {e}")
         return False
+
+
+def obtener_event_id_por_fecha(email: str, fecha: datetime) -> str | None:
+    """
+    Busca el event_id de una cita por email y fecha aproximada (±1 hora).
+    Útil cuando el cliente especifica qué cita quiere cancelar por fecha.
+    """
+    try:
+        from datetime import timedelta
+        db = get_supabase()
+        desde = (fecha - timedelta(hours=1)).isoformat()
+        hasta = (fecha + timedelta(hours=1)).isoformat()
+        result = (
+            db.table("citas")
+            .select("event_id, fecha_cita")
+            .eq("email", email)
+            .gte("fecha_cita", desde)
+            .lte("fecha_cita", hasta)
+            .order("fecha_cita")
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            event_id = result.data[0]["event_id"]
+            logger.info(f"🔍 event_id por fecha encontrado para {email}: {event_id}")
+            return event_id
+        logger.warning(f"⚠️ No se encontró cita para {email} en torno a {fecha}.")
+        return None
+    except Exception as e:
+        logger.error(f"❌ Error buscando cita por fecha para {email}: {e}")
+        return None
 
 
 def obtener_citas_futuras_todas() -> list[dict]:
