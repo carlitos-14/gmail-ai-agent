@@ -709,6 +709,11 @@ def process_new_emails():
 
         try:
             decision = analyze(subject, sender, body)
+            # El LLM a veces devuelve una lista en vez de un dict
+            if isinstance(decision, list):
+                decision = decision[0] if decision else {}
+            if not isinstance(decision, dict):
+                raise ValueError(f"Respuesta inesperada del LLM: {type(decision)}")
         except Exception as e:
             logger.error(f"Error Groq tras reintentos: {e}")
             decision = {
