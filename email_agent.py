@@ -12,7 +12,7 @@ TZ_MADRID = ZoneInfo("Europe/Madrid")
 
 # Módulos nuevos
 from pdf_context import load_company_context
-from supabase_client import guardar_cita, obtener_ultimo_event_id, eliminar_cita, contar_citas_futuras, MAX_CITAS_ACTIVAS
+from supabase_client import guardar_cita, obtener_ultimo_event_id, eliminar_cita, contar_citas_futuras, MAX_CITAS_ACTIVAS, obtener_citas_futuras_todas
 from calendar_client import agendar_cita, cancelar_cita, buscar_slots_libres, slot_disponible
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -526,9 +526,77 @@ def handle_escalar(svc, mid, tid, sender, subject, decision):
             logger.error(f"❌ Error enviando aviso de escalado: {e}")
 
 
+# ── Sincronización Supabase ↔ Calendar ────────────────────────────────────────
+def sincronizar_citas_huerfanas():
+    """
+    Sincronización bidireccional:
+    - Supabase → Calendar: si una cita de Supabase ya no existe en Calendar, la elimina de Supabase.
+    - Calendar → Supabase: si un evento "Cita:" de Calendar no existe en Supabase, lo cancela de Calendar.
+    """
+    from calendar_client import get_calendar_service, CALENDAR_ID, EVENT_DURATION_MINUTES
+    from zoneinfo import ZoneInfo
+
+    try:
+        svc = get_calendar_service()
+    except Exception as e:
+        logger.error(f"❌ No se pudo conectar a Calendar para sincronizar: {e}")
+        return
+
+    citas_supabase = obtener_citas_futuras_todas()
+    event_ids_supabase = {c["event_id"] for c in citas_supabase}
+
+    # ── Dirección 1: Supabase → Calendar ──────────────────────────────────────
+    eliminadas_supabase = 0
+    for cita in citas_supabase:
+        event_id = cita["event_id"]
+        email    = cita["email"]
+        try:
+            svc.events().get(calendarId=CALENDAR_ID, eventId=event_id).execute()
+        except Exception:
+            logger.info(f"🧹 [Supabase→Cal] Huérfana en Supabase: {event_id} ({email}) → eliminando.")
+            eliminar_cita(email=email, event_id=event_id)
+            eliminadas_supabase += 1
+
+    # ── Dirección 2: Calendar → Supabase ──────────────────────────────────────
+    eliminadas_calendar = 0
+    try:
+        ahora = datetime.now(tz=ZoneInfo("Europe/Madrid"))
+        eventos = svc.events().list(
+            calendarId=CALENDAR_ID,
+            timeMin=ahora.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+            q="Cita:",  # solo eventos creados por el bot
+        ).execute().get("items", [])
+
+        for evento in eventos:
+            eid = evento.get("id")
+            if eid not in event_ids_supabase:
+                logger.info(f"🧹 [Cal→Supabase] Huérfano en Calendar: {eid} → cancelando.")
+                try:
+                    svc.events().delete(
+                        calendarId=CALENDAR_ID,
+                        eventId=eid,
+                        sendUpdates="all",
+                    ).execute()
+                    eliminadas_calendar += 1
+                except Exception as e:
+                    logger.error(f"❌ Error cancelando evento huérfano {eid}: {e}")
+    except Exception as e:
+        logger.error(f"❌ Error consultando eventos de Calendar: {e}")
+
+    total = eliminadas_supabase + eliminadas_calendar
+    if total:
+        logger.info(f"🧹 Sincronización completa: {eliminadas_supabase} eliminada(s) de Supabase, {eliminadas_calendar} de Calendar.")
+    else:
+        logger.info("✅ Sincronización OK: Supabase y Calendar están alineados.")
+
+
 # ── Procesador principal ───────────────────────────────────────────────────────
 def process_new_emails():
     logger.info("🔍 Revisando emails...")
+
+    sincronizar_citas_huerfanas()
 
     svc = get_gmail_service()
     label_id = get_or_create_label(svc)
