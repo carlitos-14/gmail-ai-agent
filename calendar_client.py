@@ -23,7 +23,6 @@ CALENDAR_SCOPES = [
 
 CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID", "primary")
 EVENT_DURATION_MINUTES = int(os.environ.get("EVENT_DURATION_MINUTES", "60"))
-SLOT_BLOCK_HOURS = 2
 
 
 def get_calendar_service():
@@ -48,13 +47,14 @@ def slot_disponible(fecha_hora: datetime) -> bool:
     try:
         svc = get_calendar_service()
 
-        ventana_inicio = (fecha_hora - timedelta(hours=SLOT_BLOCK_HOURS)).isoformat()
-        ventana_fin    = (fecha_hora + timedelta(hours=SLOT_BLOCK_HOURS)).isoformat()
+        # Comprobar solo el rango exacto que ocuparía el nuevo evento
+        evento_inicio = fecha_hora.isoformat()
+        evento_fin    = (fecha_hora + timedelta(minutes=EVENT_DURATION_MINUTES)).isoformat()
 
         eventos = svc.events().list(
             calendarId=CALENDAR_ID,
-            timeMin=ventana_inicio,
-            timeMax=ventana_fin,
+            timeMin=evento_inicio,
+            timeMax=evento_fin,
             singleEvents=True,
             orderBy="startTime",
         ).execute()
@@ -62,7 +62,7 @@ def slot_disponible(fecha_hora: datetime) -> bool:
         conflictos = eventos.get("items", [])
 
         if conflictos:
-            logger.warning(f"⛔ Slot ocupado: {len(conflictos)} evento(s) en el rango")
+            logger.warning(f"⛔ Slot ocupado: {len(conflictos)} evento(s) solapan con {fecha_hora}")
             return False
 
         logger.info(f"✅ Slot disponible para {fecha_hora}")
@@ -75,69 +75,43 @@ def slot_disponible(fecha_hora: datetime) -> bool:
 
 def buscar_slots_libres(fecha_hora_referencia: datetime, num_slots: int = 3) -> list[datetime]:
     """
-    Busca `num_slots` franjas horarias libres próximas a `fecha_hora_referencia`.
-    Busca hacia adelante y hacia atrás en bloques de 1 hora,
-    respetando el horario de atención 09:30–17:00 de lunes a viernes.
+    Busca `num_slots` franjas horarias libres a partir de ahora (nunca en el pasado),
+    empezando desde fecha_hora_referencia si es futura, o desde ahora si ya pasó.
+    Respeta horario de atención 09:30–17:00 todos los días de la semana.
     """
-    HORA_INICIO = 9   # 09:30
+    HORA_INICIO = 9
     MIN_INICIO  = 30
-    HORA_FIN    = 17  # 17:00
+    HORA_FIN    = 17
+
+    ahora = datetime.now(tz=fecha_hora_referencia.tzinfo)
+    punto_inicio = max(ahora, fecha_hora_referencia)
+    punto_inicio = punto_inicio.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
     candidatos: list[datetime] = []
-    visitados: set[str] = set()
-
-    pasos_adelante = 0
-    pasos_atras    = 0
-    max_dias       = 14  # límite de búsqueda
+    candidato = punto_inicio
+    max_dias = 14
 
     while len(candidatos) < num_slots:
-        for delta_horas in [pasos_adelante + 1, -(pasos_atras + 1)]:
-            if len(candidatos) >= num_slots:
-                break
-
-            candidato = fecha_hora_referencia + timedelta(hours=delta_horas)
-
-            # Solo horario laboral (lun–vie, 09:30–17:00)
-            if candidato.weekday() >= 5:  # sáb / dom
-                if delta_horas > 0:
-                    pasos_adelante += 1
-                else:
-                    pasos_atras += 1
-                continue
-
-            if not (
-                (candidato.hour > HORA_INICIO or (candidato.hour == HORA_INICIO and candidato.minute >= MIN_INICIO))
-                and candidato.hour < HORA_FIN
-            ):
-                if delta_horas > 0:
-                    pasos_adelante += 1
-                else:
-                    pasos_atras += 1
-                continue
-
-            # Redondear a la hora en punto más cercana
-            candidato = candidato.replace(minute=0, second=0, microsecond=0)
-
-            clave = candidato.isoformat()
-            if clave in visitados:
-                if delta_horas > 0:
-                    pasos_adelante += 1
-                else:
-                    pasos_atras += 1
-                continue
-            visitados.add(clave)
-
-            if slot_disponible(candidato):
-                candidatos.append(candidato)
-                logger.info(f"🟢 Slot libre encontrado: {candidato}")
-
-        pasos_adelante += 1
-        pasos_atras    += 1
-
-        # Seguridad: no buscar más de max_dias
-        if pasos_adelante > max_dias * 24:
+        if candidato > punto_inicio + timedelta(days=max_dias):
             logger.warning("⚠️ Se alcanzó el límite de búsqueda de slots libres.")
             break
+
+        # Saltar fuera de horario
+        en_horario = (
+            (candidato.hour > HORA_INICIO or (candidato.hour == HORA_INICIO and candidato.minute >= MIN_INICIO))
+            and candidato.hour < HORA_FIN
+        )
+        if not en_horario:
+            candidato = (candidato + timedelta(days=1)).replace(
+                hour=HORA_INICIO, minute=MIN_INICIO, second=0, microsecond=0
+            )
+            continue
+
+        if slot_disponible(candidato):
+            candidatos.append(candidato)
+            logger.info(f"🟢 Slot libre encontrado: {candidato}")
+
+        candidato += timedelta(hours=1)
 
     return candidatos[:num_slots]
 
