@@ -48,8 +48,8 @@ def slot_disponible(fecha_hora: datetime) -> bool:
     try:
         svc = get_calendar_service()
 
-        ventana_inicio = (fecha_hora - timedelta(hours=SLOT_BLOCK_HOURS)).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
-        ventana_fin    = (fecha_hora + timedelta(hours=SLOT_BLOCK_HOURS)).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+        ventana_inicio = (fecha_hora - timedelta(hours=SLOT_BLOCK_HOURS)).isoformat()
+        ventana_fin    = (fecha_hora + timedelta(hours=SLOT_BLOCK_HOURS)).isoformat()
 
         eventos = svc.events().list(
             calendarId=CALENDAR_ID,
@@ -157,11 +157,11 @@ def agendar_cita(fecha_hora: datetime, email_cliente: str, asunto_email: str) ->
             "summary": f"Cita: {asunto_email[:80]}",
             "description": f"Cita agendada automáticamente para {email_cliente}.",
             "start": {
-                "dateTime": inicio.strftime("%Y-%m-%dT%H:%M:%S"),
+                "dateTime": inicio.isoformat(),
                 "timeZone": "Europe/Madrid",
             },
             "end": {
-                "dateTime": fin.strftime("%Y-%m-%dT%H:%M:%S"),
+                "dateTime": fin.isoformat(),
                 "timeZone": "Europe/Madrid",
             },
             "attendees": [{"email": email_cliente}],
