@@ -267,7 +267,7 @@ def handle_agendar(svc, mid, tid, sender, subject, decision):
     # ──────────────────────────────────────────────────────────────────────────
 
     try:
-        fecha_dt = dateparser.parse(fecha_str, settings={"RETURN_AS_TIMEZONE_AWARE": False})
+        fecha_dt = dateparser.parse(fecha_str)
         if fecha_dt is None:
             raise ValueError("dateparser devolvió None")
         # Interpretar la hora como local de Madrid (sin conversión)
@@ -275,6 +275,14 @@ def handle_agendar(svc, mid, tid, sender, subject, decision):
     except Exception as e:
         logger.error(f"❌ No se pudo parsear la fecha '{fecha_str}': {e}. Escalando.")
         mark_starred(svc, mid)
+        send_reply(svc, mid, tid, sender, subject,
+            f"Hola,\n\n"
+            f"Gracias por contactarnos. No hemos podido identificar claramente la fecha y hora "
+            f"que nos indicas. ¿Podrías especificarnos el día y la hora exacta a la que deseas "
+            f"la cita? Por ejemplo: 'el sábado 7 de marzo a las 13:00'.\n\n"
+            f"Un saludo,\n{COMPANY}"
+        )
+        mark_read(svc, mid)
         return
 
     hoy = datetime.now(tz=TZ_MADRID)
@@ -338,7 +346,7 @@ def handle_consultar(svc, mid, tid, sender, subject, decision):
         return
 
     try:
-        fecha_dt = dateparser.parse(fecha_str, settings={"RETURN_AS_TIMEZONE_AWARE": False})
+        fecha_dt = dateparser.parse(fecha_str)
         if fecha_dt is None:
             raise ValueError("dateparser devolvió None")
         # Interpretar la hora como local de Madrid (sin conversión)
@@ -346,6 +354,13 @@ def handle_consultar(svc, mid, tid, sender, subject, decision):
     except Exception as e:
         logger.error(f"❌ No se pudo parsear la fecha '{fecha_str}': {e}. Escalando.")
         mark_starred(svc, mid)
+        send_reply(svc, mid, tid, sender, subject,
+            f"Hola,\n\n"
+            f"Gracias por contactarnos. No hemos podido identificar claramente el día que nos indicas. "
+            f"¿Podrías especificarnos la fecha concreta? Por ejemplo: 'el sábado 7 de marzo'.\n\n"
+            f"Un saludo,\n{COMPANY}"
+        )
+        mark_read(svc, mid)
         return
 
     hoy = datetime.now(tz=TZ_MADRID)
