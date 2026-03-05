@@ -12,7 +12,7 @@ TZ_MADRID = ZoneInfo("Europe/Madrid")
 
 # Módulos nuevos
 from pdf_context import load_company_context
-from supabase_client import guardar_cita, obtener_ultimo_event_id, eliminar_cita
+from supabase_client import guardar_cita, obtener_ultimo_event_id, eliminar_cita, contar_citas_futuras, MAX_CITAS_ACTIVAS
 from calendar_client import agendar_cita, cancelar_cita, buscar_slots_libres, slot_disponible
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -244,6 +244,24 @@ def handle_agendar(svc, mid, tid, sender, subject, decision):
         logger.warning("⚠️ AGENDAR sin fecha_hora. Escalando.")
         mark_starred(svc, mid)
         return
+
+    # ── Límite de citas activas por cliente ────────────────────────────────────
+    citas_activas = contar_citas_futuras(sender)
+    if citas_activas >= MAX_CITAS_ACTIVAS:
+        logger.info(f"🚫 Límite de citas alcanzado para {sender} ({citas_activas}/{MAX_CITAS_ACTIVAS}).")
+        mensaje_limite = (
+            f"Hola,\n\n"
+            f"Gracias por contactarnos. Actualmente ya tienes {citas_activas} "
+            f"{'cita pendiente' if citas_activas == 1 else 'citas pendientes'} con nosotros y no es posible "
+            f"reservar más de {MAX_CITAS_ACTIVAS} a la vez.\n\n"
+            f"Si necesitas cancelar alguna de tus citas actuales o tienes cualquier duda, "
+            f"no dudes en escribirnos y te ayudamos encantados.\n\n"
+            f"Un saludo,\n{COMPANY}"
+        )
+        send_reply(svc, mid, tid, sender, subject, mensaje_limite)
+        mark_read(svc, mid)
+        return
+    # ──────────────────────────────────────────────────────────────────────────
 
     try:
         fecha_dt = dateparser.parse(fecha_str)
