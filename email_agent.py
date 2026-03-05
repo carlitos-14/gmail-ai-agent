@@ -57,14 +57,17 @@ Siempre devuelve fecha_hora en formato YYYY-MM-DDTHH:MM:SS, nunca texto.
 
 Analiza el email y responde SOLO con JSON válido (sin markdown, sin texto extra):
 {{
-  "accion": "AGENDAR" | "CANCELAR" | "CONSULTAR" | "RESPONDER" | "ESCALAR",
-  "fecha_hora": "YYYY-MM-DDTHH:MM:SS" (solo si accion es AGENDAR o CONSULTAR, si no: null),
+  "accion": "AGENDAR" | "CANCELAR" | "REAGENDAR" | "CONSULTAR" | "RESPONDER" | "ESCALAR",
+  "fecha_hora": "YYYY-MM-DDTHH:MM:SS" (solo si accion es AGENDAR, REAGENDAR o CONSULTAR, si no: null),
   "respuesta_texto": "Texto completo para el cuerpo del correo al cliente"
 }}
 
 Reglas de decisión:
 - AGENDAR   → el cliente pide una cita concreta con fecha y hora
-- CANCELAR  → el cliente quiere cancelar o anular una cita existente
+- CANCELAR  → el cliente quiere cancelar o anular una cita existente sin pedir otra
+- REAGENDAR → el cliente quiere cancelar su cita actual Y pedir una nueva en otra fecha/hora
+              (ej: "cancela mi cita y ponme para el viernes", "quiero cambiar mi cita al lunes a las 10")
+              fecha_hora debe ser la nueva fecha/hora solicitada.
 - CONSULTAR → el cliente pregunta por disponibilidad de un día o una hora concreta sin confirmar cita
               (ej: "¿tenéis hueco el viernes?", "¿está libre el lunes a las 10?", "¿qué horas tenéis disponibles el martes?")
               En este caso fecha_hora debe ser el día consultado a las 09:30 si no indica hora, o a la hora indicada si la menciona.
@@ -478,6 +481,91 @@ def handle_cancelar(svc, mid, tid, sender, subject, decision):
         mark_starred(svc, mid)
 
 
+def handle_reagendar(svc, mid, tid, sender, subject, decision):
+    """Cancela la cita existente y agenda una nueva en la fecha indicada."""
+    fecha_str = decision.get("fecha_hora")
+
+    if not fecha_str:
+        logger.warning("⚠️ REAGENDAR sin fecha_hora. Escalando.")
+        mark_starred(svc, mid)
+        return
+
+    # ── Paso 1: cancelar la cita actual ───────────────────────────────────────
+    event_id_actual = obtener_ultimo_event_id(sender)
+    if event_id_actual:
+        if cancelar_cita(event_id_actual):
+            eliminar_cita(email=sender, event_id=event_id_actual)
+            logger.info(f"🗑️ Cita anterior cancelada: {event_id_actual}")
+        else:
+            logger.error("❌ Fallo al cancelar cita anterior. Escalando.")
+            mark_starred(svc, mid)
+            return
+    else:
+        logger.warning(f"⚠️ No se encontró cita previa para {sender}, se procede a agendar igualmente.")
+
+    # ── Paso 2: agendar la nueva cita ─────────────────────────────────────────
+    try:
+        fecha_dt = dateparser.parse(fecha_str)
+        if fecha_dt is None:
+            raise ValueError("dateparser devolvió None")
+        fecha_dt = fecha_dt.replace(tzinfo=None).replace(tzinfo=TZ_MADRID)
+    except Exception as e:
+        logger.error(f"❌ No se pudo parsear la fecha '{fecha_str}': {e}. Escalando.")
+        mark_starred(svc, mid)
+        send_reply(svc, mid, tid, sender, subject,
+            f"Hola,\n\n"
+            f"Hemos cancelado tu cita anterior pero no hemos podido identificar la nueva fecha. "
+            f"¿Podrías indicarnos el día y hora exactos? Por ejemplo: 'el viernes 6 a las 11:00'.\n\n"
+            f"Un saludo,\n{COMPANY}"
+        )
+        mark_read(svc, mid)
+        return
+
+    hoy = datetime.now(tz=TZ_MADRID)
+    if fecha_dt < hoy:
+        fecha_dt = fecha_dt.replace(year=hoy.year)
+        if fecha_dt < hoy:
+            fecha_dt = fecha_dt.replace(year=hoy.year + 1)
+
+    # Reutilizar la lógica de agendar (sin verificar límite, ya canceló una)
+    event_id_nuevo = agendar_cita(fecha_dt, sender, subject)
+
+    if event_id_nuevo:
+        guardar_cita(email=sender, event_id=event_id_nuevo, fecha_cita=fecha_dt)
+        respuesta = decision.get("respuesta_texto", "")
+        confirmacion = (
+            f"{respuesta.rstrip()}\n\n"
+            f"📅 Nueva cita confirmada: {fecha_legible(fecha_dt)}."
+        )
+        send_reply(svc, mid, tid, sender, subject, confirmacion)
+        mark_read(svc, mid)
+        logger.info(f"🔄 Cita reagendada: {subject[:60]} → {fecha_legible(fecha_dt)}")
+    else:
+        slots_libres = buscar_slots_libres(fecha_dt, num_slots=3)
+        if slots_libres:
+            opciones_texto = "\n".join(f"  • {fecha_legible(s)}" for s in slots_libres)
+            mensaje = (
+                f"Hola,\n\n"
+                f"Hemos cancelado tu cita anterior. Sin embargo, el horario solicitado "
+                f"({fecha_legible(fecha_dt)}) no está disponible.\n\n"
+                f"Te proponemos estas fechas libres próximas:\n\n"
+                f"{opciones_texto}\n\n"
+                f"Confírmanos cuál te viene mejor y lo agendamos.\n\n"
+                f"Un saludo,\n{COMPANY}"
+            )
+        else:
+            mensaje = (
+                f"Hola,\n\n"
+                f"Hemos cancelado tu cita anterior. Sin embargo, el horario solicitado "
+                f"({fecha_legible(fecha_dt)}) no está disponible y no encontramos huecos próximos.\n\n"
+                f"Por favor, indícanos otro horario y lo revisamos.\n\n"
+                f"Recuerda que atendemos todos los días de 9:30 a 17:00.\n\n"
+                f"Un saludo,\n{COMPANY}"
+            )
+        send_reply(svc, mid, tid, sender, subject, mensaje)
+        mark_read(svc, mid)
+
+
 def handle_responder(svc, mid, tid, sender, subject, decision):
     respuesta = decision.get("respuesta_texto", "")
     if respuesta:
@@ -637,6 +725,8 @@ def process_new_emails():
             handle_consultar(svc, mid, tid, sender, subject, decision)
         elif accion == "CANCELAR":
             handle_cancelar(svc, mid, tid, sender, subject, decision)
+        elif accion == "REAGENDAR":
+            handle_reagendar(svc, mid, tid, sender, subject, decision)
         elif accion == "RESPONDER":
             handle_responder(svc, mid, tid, sender, subject, decision)
         else:
