@@ -264,17 +264,17 @@ def handle_agendar(svc, mid, tid, sender, subject, decision):
     # ──────────────────────────────────────────────────────────────────────────
 
     try:
-        fecha_dt = dateparser.parse(fecha_str)
+        fecha_dt = dateparser.parse(fecha_str, settings={"RETURN_AS_TIMEZONE_AWARE": False})
         if fecha_dt is None:
             raise ValueError("dateparser devolvió None")
-        fecha_dt = fecha_dt.replace(tzinfo=None)
-        fecha_dt = fecha_dt.replace(tzinfo=TZ_MADRID)
+        # Interpretar la hora como local de Madrid (sin conversión)
+        fecha_dt = fecha_dt.replace(tzinfo=None).replace(tzinfo=TZ_MADRID)
     except Exception as e:
         logger.error(f"❌ No se pudo parsear la fecha '{fecha_str}': {e}. Escalando.")
         mark_starred(svc, mid)
         return
 
-    hoy = datetime.now(tz=fecha_dt.tzinfo)
+    hoy = datetime.now(tz=TZ_MADRID)
     if fecha_dt < hoy:
         fecha_dt = fecha_dt.replace(year=hoy.year)
         if fecha_dt < hoy:
@@ -306,7 +306,7 @@ def handle_agendar(svc, mid, tid, sender, subject, decision):
                 f"Te proponemos las siguientes fechas libres próximas:\n\n"
                 f"{opciones_texto}\n\n"
                 f"Confírmanos cuál de estas opciones te viene mejor y lo agendamos "
-                f"de inmediato.\n\nRecuerda que atendemos de lunes a viernes de 9:30 a 17:00.\n\n"
+                f"de inmediato.\n\nRecuerda que atendemos todos los días de 9:30 a 17:00.\n\n"
                 f"Un saludo,\n{COMPANY}"
             )
         else:
@@ -317,7 +317,7 @@ def handle_agendar(svc, mid, tid, sender, subject, decision):
                 f"ya que tenemos otra cita en ese rango horario.\n\n"
                 f"En este momento no encontramos huecos libres en los próximos días. "
                 f"Por favor, indícanos otro horario de tu preferencia y lo revisamos "
-                f"sin problema.\n\nRecuerda que atendemos de lunes a viernes de 9:30 a 17:00.\n\n"
+                f"sin problema.\n\nRecuerda que atendemos todos los días de 9:30 a 17:00.\n\n"
                 f"Un saludo,\n{COMPANY}"
             )
 
@@ -335,17 +335,17 @@ def handle_consultar(svc, mid, tid, sender, subject, decision):
         return
 
     try:
-        fecha_dt = dateparser.parse(fecha_str)
+        fecha_dt = dateparser.parse(fecha_str, settings={"RETURN_AS_TIMEZONE_AWARE": False})
         if fecha_dt is None:
             raise ValueError("dateparser devolvió None")
-        fecha_dt = fecha_dt.replace(tzinfo=None)
-        fecha_dt = fecha_dt.replace(tzinfo=TZ_MADRID)
+        # Interpretar la hora como local de Madrid (sin conversión)
+        fecha_dt = fecha_dt.replace(tzinfo=None).replace(tzinfo=TZ_MADRID)
     except Exception as e:
         logger.error(f"❌ No se pudo parsear la fecha '{fecha_str}': {e}. Escalando.")
         mark_starred(svc, mid)
         return
 
-    hoy = datetime.now(tz=fecha_dt.tzinfo)
+    hoy = datetime.now(tz=TZ_MADRID)
     if fecha_dt < hoy:
         fecha_dt = fecha_dt.replace(year=hoy.year)
         if fecha_dt < hoy:
@@ -364,7 +364,7 @@ def handle_consultar(svc, mid, tid, sender, subject, decision):
                 f"Hola,\n\n"
                 f"Sí, el {dia_str} a las {fecha_dt.strftime('%H:%M')} está disponible.\n\n"
                 f"Si deseas confirmar la cita, responde a este correo y lo agendamos de inmediato.\n\n"
-                f"Recuerda que atendemos de lunes a viernes de 9:30 a 17:00.\n\n"
+                f"Recuerda que atendemos todos los días de 9:30 a 17:00.\n\n"
                 f"Un saludo,\n{COMPANY}"
             )
         else:
@@ -398,7 +398,7 @@ def handle_consultar(svc, mid, tid, sender, subject, decision):
                         f"Lamentablemente el {dia_str} no tenemos huecos disponibles "
                         f"ni encontramos fechas libres en los próximos días.\n\n"
                         f"Por favor, contáctanos de nuevo más adelante.\n\n"
-                        f"Recuerda que atendemos de lunes a viernes de 9:30 a 17:00.\n\n"
+                        f"Recuerda que atendemos todos los días de 9:30 a 17:00.\n\n"
                         f"Un saludo,\n{COMPANY}"
                     )
     else:
@@ -430,7 +430,7 @@ def handle_consultar(svc, mid, tid, sender, subject, decision):
                     f"Lamentablemente el {dia_str} no tenemos huecos disponibles "
                     f"ni encontramos fechas libres en los próximos días.\n\n"
                     f"Por favor, contáctanos de nuevo más adelante.\n\n"
-                    f"Recuerda que atendemos de lunes a viernes de 9:30 a 17:00.\n\n"
+                    f"Recuerda que atendemos todos los días de 9:30 a 17:00.\n\n"
                     f"Un saludo,\n{COMPANY}"
                 )
 
