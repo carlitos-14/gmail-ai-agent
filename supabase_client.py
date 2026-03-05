@@ -75,6 +75,33 @@ def obtener_ultimo_event_id(email: str) -> str | None:
         return None
 
 
+MAX_CITAS_ACTIVAS = int(os.environ.get("MAX_CITAS_ACTIVAS", "2"))
+
+
+def contar_citas_futuras(email: str) -> int:
+    """
+    Cuenta cuántas citas futuras (fecha_cita > ahora) tiene el cliente.
+    Usado para limitar el número de citas activas simultáneas.
+    """
+    try:
+        db = get_supabase()
+        ahora = datetime.now().astimezone().isoformat()
+        result = (
+            db.table("citas")
+            .select("event_id", count="exact")
+            .eq("email", email)
+            .gt("fecha_cita", ahora)
+            .execute()
+        )
+        total = result.count if result.count is not None else len(result.data)
+        logger.info(f"📊 Citas futuras de {email}: {total}")
+        return total
+    except Exception as e:
+        logger.error(f"❌ Error contando citas futuras para {email}: {e}")
+        # En caso de error, devolvemos 0 para no bloquear al cliente
+        return 0
+
+
 def eliminar_cita(email: str, event_id: str) -> bool:
     """
     Elimina el registro de la cita en Supabase una vez cancelada en Calendar.
