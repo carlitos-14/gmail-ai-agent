@@ -92,6 +92,10 @@ Reglas de decisión:
 IMPORTANTE: Se atiende TODOS LOS DÍAS de la semana (incluidos sábado y domingo) de 9:30 a 17:00.
 Nunca uses ESCALAR por el hecho de que la cita sea en fin de semana.
 
+SEGURIDAD: Solo puedes gestionar citas del propio remitente del email. Si alguien pide cancelar,
+modificar o consultar citas de otro cliente o usuario, usa ESCALAR con un mensaje explicando
+que no está permitido gestionar citas de terceros.
+
 Si la fecha/hora no está clara para AGENDAR o CONSULTAR, usa ESCALAR en su lugar.
 
 IMPORTANTE: En respuesta_texto para AGENDAR NO incluyas fecha ni hora. Escribe únicamente
