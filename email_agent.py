@@ -245,7 +245,6 @@ def slots_del_dia(fecha_referencia: datetime, hora_concreta: bool = False, num_s
     if hora_concreta:
         return [fecha_referencia] if slot_disponible(fecha_referencia) else []
 
-    # Generar todas las horas en punto del día laboral
     candidatos = []
     hora = fecha_referencia.replace(hour=HORA_INICIO, minute=MIN_INICIO, second=0, microsecond=0)
     while hora.hour < HORA_FIN:
@@ -260,20 +259,14 @@ def slots_del_dia(fecha_referencia: datetime, hora_concreta: bool = False, num_s
 
 # ── Manejadores de cada acción ─────────────────────────────────────────────────
 def handle_agendar(svc, mid, tid, sender, subject, decision, solo_resultado=False):
-    """
-    Procesa una acción AGENDAR.
-    Si solo_resultado=True, no envía el email — devuelve el texto de confirmación
-    para que el caller lo acumule y envíe junto con otras confirmaciones.
-    """
     fecha_str = decision.get("fecha_hora")
     respuesta = decision.get("respuesta_texto", "")
 
     if not fecha_str:
         logger.warning("⚠️ AGENDAR sin fecha_hora. Escalando.")
         mark_starred(svc, mid)
-        return None if solo_resultado else None
+        return None
 
-    # ── Límite de citas activas por cliente ────────────────────────────────────
     citas_activas = contar_citas_futuras(sender)
     if citas_activas >= MAX_CITAS_ACTIVAS:
         logger.info(f"🚫 Límite de citas alcanzado para {sender} ({citas_activas}/{MAX_CITAS_ACTIVAS}).")
@@ -290,7 +283,6 @@ def handle_agendar(svc, mid, tid, sender, subject, decision, solo_resultado=Fals
             send_reply(svc, mid, tid, sender, subject, mensaje_limite)
             mark_read(svc, mid)
         return mensaje_limite if solo_resultado else None
-    # ──────────────────────────────────────────────────────────────────────────
 
     try:
         fecha_dt = dateparser.parse(fecha_str)
@@ -329,7 +321,6 @@ def handle_agendar(svc, mid, tid, sender, subject, decision, solo_resultado=Fals
             send_reply(svc, mid, tid, sender, subject, confirmacion)
             mark_read(svc, mid)
         logger.info(f"📅 Cita agendada: {subject[:60]} → {fecha_legible(fecha_dt)}")
-        # En modo solo_resultado devolvemos solo la línea de fecha para el email combinado
         return f"📅 {fecha_legible(fecha_dt)}" if solo_resultado else None
     else:
         logger.warning("⛔ Slot ocupado. Buscando alternativas.")
@@ -366,7 +357,6 @@ def handle_consultar(svc, mid, tid, sender, subject, decision):
         fecha_dt = dateparser.parse(fecha_str)
         if fecha_dt is None:
             raise ValueError("dateparser devolvió None")
-        # Interpretar la hora como local de Madrid (sin conversión)
         fecha_dt = fecha_dt.replace(tzinfo=None).replace(tzinfo=TZ_MADRID)
     except Exception as e:
         logger.error(f"❌ No se pudo parsear la fecha '{fecha_str}': {e}. Escalando.")
@@ -386,14 +376,12 @@ def handle_consultar(svc, mid, tid, sender, subject, decision):
         if fecha_dt < hoy:
             fecha_dt = fecha_dt.replace(year=hoy.year + 1)
 
-    # Si el LLM puso una hora concreta (distinta de 09:30), consultamos esa hora exacta
     hora_concreta = not (fecha_dt.hour == 9 and fecha_dt.minute == 30)
     slots = slots_del_dia(fecha_dt, hora_concreta=hora_concreta, num_slots=3)
 
     dia_str = f"{DIAS[fecha_dt.weekday()]} {fecha_dt.strftime('%d/%m/%Y')}"
 
     if hora_concreta:
-        # El cliente preguntó por una hora concreta
         if slots:
             mensaje = (
                 f"Hola,\n\n"
@@ -403,7 +391,6 @@ def handle_consultar(svc, mid, tid, sender, subject, decision):
                 f"Un saludo,\n{COMPANY}"
             )
         else:
-            # Hora ocupada — ofrecemos alternativas ese mismo día, y si no hay, los próximos slots
             alternativas = slots_del_dia(fecha_dt, hora_concreta=False, num_slots=3)
             if alternativas:
                 opciones_texto = "\n".join(f"  • {fecha_legible(s)}" for s in alternativas)
@@ -437,7 +424,6 @@ def handle_consultar(svc, mid, tid, sender, subject, decision):
                         f"Un saludo,\n{COMPANY}"
                     )
     else:
-        # El cliente preguntó por disponibilidad general del día
         if slots:
             opciones_texto = "\n".join(f"  • {fecha_legible(s)}" for s in slots)
             mensaje = (
@@ -478,7 +464,6 @@ def handle_cancelar(svc, mid, tid, sender, subject, decision, solo_resultado=Fal
     respuesta = decision.get("respuesta_texto", "")
     fecha_str = decision.get("fecha_hora")
 
-    # Si el LLM identificó una fecha concreta, buscar por fecha; si no, usar la más reciente
     if fecha_str:
         try:
             fecha_dt = dateparser.parse(fecha_str)
@@ -530,7 +515,6 @@ def handle_reagendar(svc, mid, tid, sender, subject, decision):
         mark_starred(svc, mid)
         return
 
-    # ── Paso 1: cancelar la cita actual ───────────────────────────────────────
     event_id_actual = obtener_ultimo_event_id(sender)
     if event_id_actual:
         if cancelar_cita(event_id_actual):
@@ -543,7 +527,6 @@ def handle_reagendar(svc, mid, tid, sender, subject, decision):
     else:
         logger.warning(f"⚠️ No se encontró cita previa para {sender}, se procede a agendar igualmente.")
 
-    # ── Paso 2: agendar la nueva cita ─────────────────────────────────────────
     try:
         fecha_dt = dateparser.parse(fecha_str)
         if fecha_dt is None:
@@ -567,7 +550,6 @@ def handle_reagendar(svc, mid, tid, sender, subject, decision):
         if fecha_dt < hoy:
             fecha_dt = fecha_dt.replace(year=hoy.year + 1)
 
-    # Reutilizar la lógica de agendar (sin verificar límite, ya canceló una)
     event_id_nuevo = agendar_cita(fecha_dt, sender, subject)
 
     if event_id_nuevo:
@@ -658,6 +640,10 @@ def handle_cancelar_todas(svc, mid, tid, sender, subject, decision):
     mark_read(svc, mid)
     if fallidas:
         mark_starred(svc, mid)
+
+
+def handle_responder(svc, mid, tid, sender, subject, decision):
+    """Envía una respuesta directa al cliente con la info solicitada."""
     respuesta = decision.get("respuesta_texto", "")
     if respuesta:
         send_reply(svc, mid, tid, sender, subject, respuesta)
@@ -707,11 +693,6 @@ def handle_escalar(svc, mid, tid, sender, subject, decision):
 
 # ── Sincronización Supabase ↔ Calendar ────────────────────────────────────────
 def sincronizar_citas_huerfanas():
-    """
-    Sincronización bidireccional:
-    - Supabase → Calendar: si una cita de Supabase ya no existe en Calendar, la elimina de Supabase.
-    - Calendar → Supabase: si un evento "Cita:" de Calendar no existe en Supabase, lo cancela de Calendar.
-    """
     from calendar_client import get_calendar_service, CALENDAR_ID, EVENT_DURATION_MINUTES
     from zoneinfo import ZoneInfo
 
@@ -724,7 +705,6 @@ def sincronizar_citas_huerfanas():
     citas_supabase = obtener_citas_futuras_todas()
     event_ids_supabase = {c["event_id"] for c in citas_supabase}
 
-    # ── Dirección 1: Supabase → Calendar ──────────────────────────────────────
     eliminadas_supabase = 0
     for cita in citas_supabase:
         event_id = cita["event_id"]
@@ -736,7 +716,6 @@ def sincronizar_citas_huerfanas():
             eliminar_cita(email=email, event_id=event_id)
             eliminadas_supabase += 1
 
-    # ── Dirección 2: Calendar → Supabase ──────────────────────────────────────
     eliminadas_calendar = 0
     try:
         ahora = datetime.now(tz=ZoneInfo("Europe/Madrid"))
@@ -745,7 +724,7 @@ def sincronizar_citas_huerfanas():
             timeMin=ahora.isoformat(),
             singleEvents=True,
             orderBy="startTime",
-            q="Cita:",  # solo eventos creados por el bot
+            q="Cita:",
         ).execute().get("items", [])
 
         for evento in eventos:
@@ -800,7 +779,6 @@ def process_new_emails():
 
         try:
             decision = analyze(subject, sender, body)
-            # Normalizar siempre a lista para procesado uniforme
             if isinstance(decision, dict):
                 decisions = [decision]
             elif isinstance(decision, list):
@@ -817,7 +795,6 @@ def process_new_emails():
                 "respuesta_texto": f"Error IA: {e}"
             }]
 
-        # Procesar cada acción; acumular líneas de confirmación para el email final
         respuestas_finales = []
         cancelaciones = []
         escalado = False
@@ -845,7 +822,6 @@ def process_new_emails():
                 escalado = True
                 handle_escalar(svc, mid, tid, sender, subject, decision)
 
-        # Email único para múltiples AGENDARs
         if respuestas_finales:
             if len(respuestas_finales) == 1:
                 cuerpo_final = (
@@ -867,7 +843,6 @@ def process_new_emails():
             send_reply(svc, mid, tid, sender, subject, cuerpo_final)
             mark_read(svc, mid)
 
-        # Email único para múltiples CANCELARs
         if cancelaciones:
             if len(cancelaciones) == 1:
                 cuerpo_cancel = (
