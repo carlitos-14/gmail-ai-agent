@@ -12,7 +12,7 @@ TZ_MADRID = ZoneInfo("Europe/Madrid")
 
 # Módulos nuevos
 from pdf_context import load_company_context
-from supabase_client import guardar_cita, obtener_ultimo_event_id, eliminar_cita, contar_citas_futuras, MAX_CITAS_ACTIVAS, obtener_citas_futuras_todas
+from supabase_client import guardar_cita, obtener_ultimo_event_id, eliminar_cita, contar_citas_futuras, MAX_CITAS_ACTIVAS, obtener_citas_futuras_todas, obtener_event_id_por_fecha, obtener_todas_citas_cliente
 from calendar_client import agendar_cita, cancelar_cita, buscar_slots_libres, slot_disponible
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -60,7 +60,7 @@ Si el cliente pide UNA sola acción, devuelve un objeto. Si pide VARIAS (ej: dos
 
 Un objeto:
 {{
-  "accion": "AGENDAR" | "CANCELAR" | "REAGENDAR" | "CONSULTAR" | "RESPONDER" | "ESCALAR",
+  "accion": "AGENDAR" | "CANCELAR" | "CANCELAR_TODAS" | "REAGENDAR" | "CONSULTAR" | "RESPONDER" | "ESCALAR",
   "fecha_hora": "YYYY-MM-DDTHH:MM:SS" (solo si accion es AGENDAR, REAGENDAR o CONSULTAR, si no: null),
   "respuesta_texto": "Texto completo para el cuerpo del correo al cliente"
 }}
@@ -75,7 +75,9 @@ IMPORTANTE: Cuando devuelvas una lista, el respuesta_texto de CADA objeto debe s
 
 Reglas de decisión:
 - AGENDAR   → el cliente pide una cita concreta con fecha y hora
-- CANCELAR  → el cliente quiere cancelar o anular una cita existente sin pedir otra
+- CANCELAR  → el cliente quiere cancelar una cita existente sin pedir otra.
+              Si menciona una fecha/hora concreta, ponla en fecha_hora. Si no especifica, fecha_hora es null (se cancelará la más reciente).
+- CANCELAR_TODAS → el cliente quiere cancelar TODAS sus citas a la vez (ej: "cancela todas mis citas", "elimina todo lo que tenga"). fecha_hora es null.
 - REAGENDAR → el cliente quiere cancelar su cita actual Y pedir una nueva en otra fecha/hora
               (ej: "cancela mi cita y ponme para el viernes", "quiero cambiar mi cita al lunes a las 10")
               fecha_hora debe ser la nueva fecha/hora solicitada.
@@ -323,7 +325,8 @@ def handle_agendar(svc, mid, tid, sender, subject, decision, solo_resultado=Fals
             send_reply(svc, mid, tid, sender, subject, confirmacion)
             mark_read(svc, mid)
         logger.info(f"📅 Cita agendada: {subject[:60]} → {fecha_legible(fecha_dt)}")
-        return confirmacion if solo_resultado else None
+        # En modo solo_resultado devolvemos solo la línea de fecha para el email combinado
+        return f"📅 {fecha_legible(fecha_dt)}" if solo_resultado else None
     else:
         logger.warning("⛔ Slot ocupado. Buscando alternativas.")
         slots_libres = buscar_slots_libres(fecha_dt, num_slots=3)
@@ -467,25 +470,51 @@ def handle_consultar(svc, mid, tid, sender, subject, decision):
     logger.info(f"🔍 Consulta de disponibilidad respondida: {subject[:60]}")
 
 
-def handle_cancelar(svc, mid, tid, sender, subject, decision):
+def handle_cancelar(svc, mid, tid, sender, subject, decision, solo_resultado=False):
     respuesta = decision.get("respuesta_texto", "")
-    event_id = obtener_ultimo_event_id(sender)
+    fecha_str = decision.get("fecha_hora")
+
+    # Si el LLM identificó una fecha concreta, buscar por fecha; si no, usar la más reciente
+    if fecha_str:
+        try:
+            fecha_dt = dateparser.parse(fecha_str)
+            if fecha_dt is None:
+                raise ValueError("dateparser devolvió None")
+            fecha_dt = fecha_dt.replace(tzinfo=None).replace(tzinfo=TZ_MADRID)
+            event_id = obtener_event_id_por_fecha(sender, fecha_dt)
+        except Exception as e:
+            logger.error(f"❌ No se pudo parsear fecha de cancelación '{fecha_str}': {e}")
+            event_id = obtener_ultimo_event_id(sender)
+    else:
+        event_id = obtener_ultimo_event_id(sender)
 
     if not event_id:
         logger.warning(f"⚠️ No se encontró cita para cancelar: {sender}. Escalando.")
         mark_starred(svc, mid)
-        return
+        if not solo_resultado:
+            send_reply(svc, mid, tid, sender, subject,
+                f"Hola,\n\n"
+                f"No hemos encontrado ninguna cita registrada para cancelar. "
+                f"Si crees que es un error, por favor contáctanos.\n\n"
+                f"Un saludo,\n{COMPANY}"
+            )
+            mark_read(svc, mid)
+        return None
 
     cancelado = cancelar_cita(event_id)
 
     if cancelado:
         eliminar_cita(email=sender, event_id=event_id)
-        send_reply(svc, mid, tid, sender, subject, respuesta)
-        mark_read(svc, mid)
-        logger.info(f"🗑️ Cita cancelada y confirmada: {subject[:60]}")
+        fecha_legible_str = fecha_legible(fecha_dt) if fecha_str and fecha_dt else "tu cita"
+        if not solo_resultado:
+            send_reply(svc, mid, tid, sender, subject, respuesta)
+            mark_read(svc, mid)
+        logger.info(f"🗑️ Cita cancelada: {subject[:60]}")
+        return fecha_legible_str if solo_resultado else None
     else:
         logger.error("❌ Fallo al cancelar evento en Calendar. Escalando.")
         mark_starred(svc, mid)
+        return None
 
 
 def handle_reagendar(svc, mid, tid, sender, subject, decision):
@@ -573,7 +602,58 @@ def handle_reagendar(svc, mid, tid, sender, subject, decision):
         mark_read(svc, mid)
 
 
-def handle_responder(svc, mid, tid, sender, subject, decision):
+def handle_cancelar_todas(svc, mid, tid, sender, subject, decision):
+    citas = obtener_todas_citas_cliente(sender)
+
+    if not citas:
+        send_reply(svc, mid, tid, sender, subject,
+            f"Hola,\n\n"
+            f"No hemos encontrado ninguna cita futura registrada para tu cuenta.\n\n"
+            f"Un saludo,\n{COMPANY}"
+        )
+        mark_read(svc, mid)
+        return
+
+    canceladas = []
+    fallidas = []
+
+    for cita in citas:
+        event_id   = cita["event_id"]
+        fecha_cita = cita["fecha_cita"]
+        try:
+            fecha_dt = dateparser.parse(fecha_cita)
+            fecha_dt = fecha_dt.replace(tzinfo=None).replace(tzinfo=TZ_MADRID)
+            fecha_str = fecha_legible(fecha_dt)
+        except Exception:
+            fecha_str = fecha_cita
+
+        if cancelar_cita(event_id):
+            eliminar_cita(email=sender, event_id=event_id)
+            canceladas.append(fecha_str)
+            logger.info(f"🗑️ Cancelada: {event_id} ({fecha_str})")
+        else:
+            fallidas.append(fecha_str)
+            logger.error(f"❌ Fallo al cancelar: {event_id} ({fecha_str})")
+
+    if canceladas:
+        lista = "\n".join(f"  {i+1}. 🗑️ {f}" for i, f in enumerate(canceladas))
+        msg = (
+            f"Hola,\n\n"
+            f"Hemos cancelado todas tus citas:\n\n{lista}\n\n"
+        )
+        if fallidas:
+            msg += f"No pudimos cancelar las siguientes (revísalas manualmente):\n" + \
+                   "\n".join(f"  • {f}" for f in fallidas) + "\n\n"
+        msg += f"Si necesitas reservar una nueva cita, estaremos encantados de ayudarte.\n\nUn saludo,\n{COMPANY}"
+    else:
+        msg = (
+            f"Hola,\n\nNo pudimos cancelar tus citas. Por favor, contáctanos para resolverlo.\n\nUn saludo,\n{COMPANY}"
+        )
+
+    send_reply(svc, mid, tid, sender, subject, msg)
+    mark_read(svc, mid)
+    if fallidas:
+        mark_starred(svc, mid)
     respuesta = decision.get("respuesta_texto", "")
     if respuesta:
         send_reply(svc, mid, tid, sender, subject, respuesta)
@@ -735,6 +815,7 @@ def process_new_emails():
 
         # Procesar cada acción; acumular líneas de confirmación para el email final
         respuestas_finales = []
+        cancelaciones = []
         escalado = False
 
         for decision in decisions:
@@ -744,10 +825,14 @@ def process_new_emails():
                 resultado = handle_agendar(svc, mid, tid, sender, subject, decision, solo_resultado=True)
                 if resultado:
                     respuestas_finales.append(resultado)
+            elif accion == "CANCELAR":
+                resultado = handle_cancelar(svc, mid, tid, sender, subject, decision, solo_resultado=True)
+                if resultado:
+                    cancelaciones.append(resultado)
+            elif accion == "CANCELAR_TODAS":
+                handle_cancelar_todas(svc, mid, tid, sender, subject, decision)
             elif accion == "CONSULTAR":
                 handle_consultar(svc, mid, tid, sender, subject, decision)
-            elif accion == "CANCELAR":
-                handle_cancelar(svc, mid, tid, sender, subject, decision)
             elif accion == "REAGENDAR":
                 handle_reagendar(svc, mid, tid, sender, subject, decision)
             elif accion == "RESPONDER":
@@ -756,10 +841,48 @@ def process_new_emails():
                 escalado = True
                 handle_escalar(svc, mid, tid, sender, subject, decision)
 
-        # Si hubo múltiples AGENDARs, enviar un único email con todas las confirmaciones
+        # Email único para múltiples AGENDARs
         if respuestas_finales:
-            cuerpo_final = "\n\n---\n\n".join(respuestas_finales)
+            if len(respuestas_finales) == 1:
+                cuerpo_final = (
+                    f"Estimado/a cliente,\n\n"
+                    f"Le confirmamos que su cita ha sido agendada:\n\n"
+                    f"{respuestas_finales[0]}\n\n"
+                    f"Si necesita realizar algún cambio o cancelación, no dude en contactarnos.\n\n"
+                    f"Un saludo,\n{COMPANY}"
+                )
+            else:
+                fechas = "\n".join(f"  {i+1}. {r}" for i, r in enumerate(respuestas_finales))
+                cuerpo_final = (
+                    f"Estimado/a cliente,\n\n"
+                    f"Le confirmamos que sus {len(respuestas_finales)} citas han sido agendadas:\n\n"
+                    f"{fechas}\n\n"
+                    f"Si necesita realizar algún cambio o cancelación, no dude en contactarnos.\n\n"
+                    f"Un saludo,\n{COMPANY}"
+                )
             send_reply(svc, mid, tid, sender, subject, cuerpo_final)
+            mark_read(svc, mid)
+
+        # Email único para múltiples CANCELARs
+        if cancelaciones:
+            if len(cancelaciones) == 1:
+                cuerpo_cancel = (
+                    f"Estimado/a cliente,\n\n"
+                    f"Le confirmamos que su cita ha sido cancelada:\n\n"
+                    f"  🗑️ {cancelaciones[0]}\n\n"
+                    f"Si desea reservar una nueva cita, no dude en escribirnos.\n\n"
+                    f"Un saludo,\n{COMPANY}"
+                )
+            else:
+                fechas = "\n".join(f"  {i+1}. 🗑️ {c}" for i, c in enumerate(cancelaciones))
+                cuerpo_cancel = (
+                    f"Estimado/a cliente,\n\n"
+                    f"Le confirmamos que sus {len(cancelaciones)} citas han sido canceladas:\n\n"
+                    f"{fechas}\n\n"
+                    f"Si desea reservar nuevas citas, no dude en escribirnos.\n\n"
+                    f"Un saludo,\n{COMPANY}"
+                )
+            send_reply(svc, mid, tid, sender, subject, cuerpo_cancel)
             mark_read(svc, mid)
 
         mark_bot_processed(svc, mid, label_id)
