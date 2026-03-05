@@ -114,3 +114,23 @@ def eliminar_cita(email: str, event_id: str) -> bool:
     except Exception as e:
         logger.error(f"❌ Error eliminando cita de Supabase: {e}")
         return False
+
+
+def obtener_citas_futuras_todas() -> list[dict]:
+    """
+    Devuelve todas las citas futuras de Supabase (de cualquier cliente).
+    Usado para detectar citas huérfanas (borradas de Calendar pero no de Supabase).
+    """
+    try:
+        db = get_supabase()
+        ahora = datetime.now().astimezone().isoformat()
+        result = (
+            db.table("citas")
+            .select("email, event_id, fecha_cita")
+            .gt("fecha_cita", ahora)
+            .execute()
+        )
+        return result.data or []
+    except Exception as e:
+        logger.error(f"❌ Error obteniendo citas futuras de Supabase: {e}")
+        return []
