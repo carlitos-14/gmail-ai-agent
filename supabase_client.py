@@ -11,9 +11,16 @@ Esquema esperado de la tabla `citas`:
 
 import logging
 import os
+import re
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+
+def clean_email(raw: str) -> str:
+    """Extrae solo el email de cadenas como 'Nombre <email@x.com>'."""
+    m = re.search(r'<(.+?)>', raw)
+    return m.group(1).strip() if m else raw.strip()
 
 
 def get_supabase():
@@ -30,18 +37,14 @@ def get_supabase():
 
 
 def guardar_cita(email: str, event_id: str, fecha_cita: datetime) -> bool:
-    """
-    Inserta un registro nuevo en la tabla `citas`.
-    Devuelve True si tuvo éxito, False si falló.
-    """
     try:
         db = get_supabase()
         db.table("citas").insert({
-            "email": email,
+            "email": clean_email(email),
             "event_id": event_id,
             "fecha_cita": fecha_cita.isoformat(),
         }).execute()
-        logger.info(f"💾 Cita guardada en Supabase para {email} | event_id: {event_id}")
+        logger.info(f"💾 Cita guardada en Supabase para {clean_email(email)} | event_id: {event_id}")
         return True
     except Exception as e:
         logger.error(f"❌ Error guardando cita en Supabase: {e}")
@@ -58,17 +61,17 @@ def obtener_ultimo_event_id(email: str) -> str | None:
         result = (
             db.table("citas")
             .select("event_id, fecha_cita")
-            .eq("email", email)
+            .eq("email", clean_email(email))
             .order("created_at", desc=True)
             .limit(1)
             .execute()
         )
         if result.data:
             event_id = result.data[0]["event_id"]
-            logger.info(f"🔍 event_id encontrado para {email}: {event_id}")
+            logger.info(f"🔍 event_id encontrado para {clean_email(email)}: {event_id}")
             return event_id
         else:
-            logger.warning(f"⚠️ No se encontró ninguna cita para {email}.")
+            logger.warning(f"⚠️ No se encontró ninguna cita para {clean_email(email)}.")
             return None
     except Exception as e:
         logger.error(f"❌ Error consultando Supabase para {email}: {e}")
@@ -76,17 +79,13 @@ def obtener_ultimo_event_id(email: str) -> str | None:
 
 
 def obtener_todas_citas_cliente(email: str) -> list[dict]:
-    """
-    Devuelve todas las citas futuras de un cliente concreto.
-    Usado para cancelar todas sus citas de una vez.
-    """
     try:
         db = get_supabase()
         ahora = datetime.now().astimezone().isoformat()
         result = (
             db.table("citas")
             .select("event_id, fecha_cita")
-            .eq("email", email)
+            .eq("email", clean_email(email))
             .gt("fecha_cita", ahora)
             .order("fecha_cita")
             .execute()
@@ -101,37 +100,29 @@ MAX_CITAS_ACTIVAS = int(os.environ.get("MAX_CITAS_ACTIVAS", "2"))
 
 
 def contar_citas_futuras(email: str) -> int:
-    """
-    Cuenta cuántas citas futuras (fecha_cita > ahora) tiene el cliente.
-    Usado para limitar el número de citas activas simultáneas.
-    """
     try:
         db = get_supabase()
         ahora = datetime.now().astimezone().isoformat()
         result = (
             db.table("citas")
             .select("event_id", count="exact")
-            .eq("email", email)
+            .eq("email", clean_email(email))
             .gt("fecha_cita", ahora)
             .execute()
         )
         total = result.count if result.count is not None else len(result.data)
-        logger.info(f"📊 Citas futuras de {email}: {total}")
+        logger.info(f"📊 Citas futuras de {clean_email(email)}: {total}")
         return total
     except Exception as e:
         logger.error(f"❌ Error contando citas futuras para {email}: {e}")
-        # En caso de error, devolvemos 0 para no bloquear al cliente
         return 0
 
 
 def eliminar_cita(email: str, event_id: str) -> bool:
-    """
-    Elimina el registro de la cita en Supabase una vez cancelada en Calendar.
-    """
     try:
         db = get_supabase()
-        db.table("citas").delete().eq("email", email).eq("event_id", event_id).execute()
-        logger.info(f"🗑️ Registro eliminado de Supabase: {email} | {event_id}")
+        db.table("citas").delete().eq("email", clean_email(email)).eq("event_id", event_id).execute()
+        logger.info(f"🗑️ Registro eliminado de Supabase: {clean_email(email)} | {event_id}")
         return True
     except Exception as e:
         logger.error(f"❌ Error eliminando cita de Supabase: {e}")
@@ -140,18 +131,27 @@ def eliminar_cita(email: str, event_id: str) -> bool:
 
 def obtener_event_id_por_fecha(email: str, fecha: datetime) -> str | None:
     """
-    Busca el event_id de una cita por email y fecha aproximada (±1 hora).
-    Útil cuando el cliente especifica qué cita quiere cancelar por fecha.
+    Busca el event_id de una cita por email y fecha aproximada.
+    Si fecha_hora es medianoche (00:00), busca en todo el día.
+    Si tiene hora concreta, busca ±2 horas.
     """
     try:
         from datetime import timedelta
         db = get_supabase()
-        desde = (fecha - timedelta(hours=1)).isoformat()
-        hasta = (fecha + timedelta(hours=1)).isoformat()
+        email_limpio = clean_email(email)
+
+        # Si la hora es medianoche asumimos que solo saben el día → buscar todo el día
+        if fecha.hour == 0 and fecha.minute == 0:
+            desde = fecha.replace(hour=0, minute=0, second=0).isoformat()
+            hasta = fecha.replace(hour=23, minute=59, second=59).isoformat()
+        else:
+            desde = (fecha - timedelta(hours=2)).isoformat()
+            hasta = (fecha + timedelta(hours=2)).isoformat()
+
         result = (
             db.table("citas")
             .select("event_id, fecha_cita")
-            .eq("email", email)
+            .eq("email", email_limpio)
             .gte("fecha_cita", desde)
             .lte("fecha_cita", hasta)
             .order("fecha_cita")
@@ -160,9 +160,9 @@ def obtener_event_id_por_fecha(email: str, fecha: datetime) -> str | None:
         )
         if result.data:
             event_id = result.data[0]["event_id"]
-            logger.info(f"🔍 event_id por fecha encontrado para {email}: {event_id}")
+            logger.info(f"🔍 event_id por fecha encontrado para {email_limpio}: {event_id}")
             return event_id
-        logger.warning(f"⚠️ No se encontró cita para {email} en torno a {fecha}.")
+        logger.warning(f"⚠️ No se encontró cita para {email_limpio} en torno a {fecha}.")
         return None
     except Exception as e:
         logger.error(f"❌ Error buscando cita por fecha para {email}: {e}")
