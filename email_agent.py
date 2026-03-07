@@ -76,7 +76,10 @@ IMPORTANTE: Cuando devuelvas una lista, el respuesta_texto de CADA objeto debe s
 Reglas de decisión:
 - AGENDAR   → el cliente pide una cita concreta con fecha y hora
 - CANCELAR  → el cliente quiere cancelar una cita existente sin pedir otra.
-              Si menciona una fecha/hora concreta, ponla en fecha_hora. Si no especifica, fecha_hora es null (se cancelará la más reciente).
+              Si menciona una fecha/hora concreta, ponla en fecha_hora.
+              Si menciona solo el día (ej: "la del lunes", "la de mañana", "la del martes"), resuelve la fecha usando el calendario de arriba y ponla en fecha_hora a las 00:00:00 (el sistema buscará la cita más cercana a ese día).
+              Si no especifica nada, fecha_hora es null (se cancelará la más reciente).
+              NUNCA uses ESCALAR para una cancelación, aunque la fecha no sea exacta.
 - CANCELAR_TODAS → el cliente quiere cancelar TODAS sus citas a la vez (ej: "cancela todas mis citas", "elimina todo lo que tenga"). fecha_hora es null.
 - REAGENDAR → el cliente quiere cancelar su cita actual Y pedir una nueva en otra fecha/hora
               (ej: "cancela mi cita y ponme para el viernes", "quiero cambiar mi cita al lunes a las 10")
@@ -97,6 +100,7 @@ modificar o consultar citas de otro cliente o usuario, usa ESCALAR con un mensaj
 que no está permitido gestionar citas de terceros.
 
 Si la fecha/hora no está clara para AGENDAR o CONSULTAR, usa ESCALAR en su lugar.
+Para CANCELAR, nunca uses ESCALAR aunque la fecha no sea exacta: intenta siempre resolverla.
 
 IMPORTANTE: En respuesta_texto para AGENDAR NO incluyas fecha ni hora. Escribe únicamente
 el texto de confirmación sin mencionar ninguna fecha ni hora concreta, por ejemplo:
